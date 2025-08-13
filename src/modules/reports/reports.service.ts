@@ -8,6 +8,8 @@ import { ReportGeneratorService } from "../report-generator/report-generator.ser
 import { Report } from "src/entities/report.entity";
 import { User } from "src/entities/user.entity";
 import { UserService } from "../users/user.service";
+import { ReportParameter } from "src/entities/report-parameter.entity";
+import { ReportSchedule } from "src/entities/report-schedule.entity";
 
 // modules/reports/reports.service.ts
 @Injectable()
@@ -59,5 +61,177 @@ export class ReportsService {
     );
   }
 
+  async getReports(): Promise<Report[]> {
+    const reports = await this.reportRepository.find({
+      relations: ['dataSource', 'parameters', 'schedules', 'createdBy']
+    });
+    return reports.map(r => this.mapToClientReport(r) as unknown as Report);
+  }
+
+  async getReport(id: string): Promise<Report|null> {
+    const report = await this.reportRepository.findOne({
+      where: { id },
+      relations: ['dataSource', 'parameters', 'schedules', 'createdBy']
+    });
+    if (!report) return null;
+    return this.mapToClientReport(report) as unknown as Report;
+  }
+
+  async createReport(report: Report): Promise<Report> {
+    // Ensure layoutConfig is properly set
+    if (report.layoutConfig) {
+      // If layoutConfig is already an object, it will be automatically serialized by TypeORM
+      // If it's a string, we need to parse it
+      if (typeof report.layoutConfig === 'string') {
+        try {
+          report.layoutConfig = JSON.parse(report.layoutConfig);
+        } catch (error) {
+          console.error('Failed to parse layoutConfig:', error);
+        }
+      }
+    }
     
+    return this.reportRepository.save(report);
+  }
+
+  async updateReport(id: string, report: Report): Promise<Report> {
+    // Ensure layoutConfig is properly set
+    if (report.layoutConfig) {
+      // If layoutConfig is already an object, it will be automatically serialized by TypeORM
+      // If it's a string, we need to parse it
+      if (typeof report.layoutConfig === 'string') {
+        try {
+          report.layoutConfig = JSON.parse(report.layoutConfig);
+        } catch (error) {
+          console.error('Failed to parse layoutConfig:', error);
+        }
+      }
+    }
+    
+    return this.reportRepository.save(report);
+  }
+
+  async deleteReport(id: string): Promise<void> {
+    await this.reportRepository.delete(id);
+  }
+
+  async archiveReport(id: string): Promise<void> {
+    const report = await this.reportRepository.findOneBy({id:id});
+    if(!report) {
+      throw new Error(`Report with ID ${id} not found.`);
+    }
+    report.isArchived = true;
+    await this.reportRepository.save(report);
+  }
+
+  async unarchiveReport(id: string): Promise<void> {
+    const report = await this.reportRepository.findOneBy({id:id});
+    if(!report) {
+      throw new Error(`Report with ID ${id} not found.`);
+    }
+    report.isArchived = false;
+    await this.reportRepository.save(report);
+  }
+
+  async publishReport(id: string): Promise<void> {
+    const report = await this.reportRepository.findOneBy({id:id});
+    if(!report) {
+      throw new Error(`Report with ID ${id} not found.`);
+    }
+    report.isPublic = true;
+    await this.reportRepository.save(report);
+  }
+
+  async unpublishReport(id: string): Promise<void> {
+    const report = await this.reportRepository.findOneBy({id:id});
+    if(!report) {
+      throw new Error(`Report with ID ${id} not found.`);
+    }
+    report.isPublic = false;
+    await this.reportRepository.save(report);
+  }
+
+  async getReportParameters(id: string): Promise<ReportParameter[]> {
+    const report = await this.reportRepository.findOneBy({id:id});
+    if(!report) {
+      throw new Error(`Report with ID ${id} not found.`);
+    }
+    return report.parameters;
+  }
+
+  async getReportSchedules(id: string): Promise<ReportSchedule[]> {
+    const report = await this.reportRepository.findOneBy({id:id});
+    if(!report) {
+      throw new Error(`Report with ID ${id} not found.`);
+    }
+    return report.schedules;
+  }
+
+  // Map persisted report entity to an API-friendly structure for the web client
+  private mapToClientReport(report: Report): Record<string, any> {
+    const query = report.queryConfig as any || {};
+    const layout = report.layoutConfig as any || {};
+
+    // Use the actual selectedFields column instead of extracting from query.fields
+    const selectedFields = Array.isArray(report.queryConfig.fields)
+      ? report.queryConfig.fields.map((f: any) => ({
+          id: f.id || `${f.tableName}.${f.fieldName}`,
+          tableName: f.tableName,
+          fieldName: f.fieldName,
+          displayName: f.alias || f.displayName || f.fieldName,
+          dataType: f.dataType,
+          aggregation: f.aggregation,
+          formatting: f.formatting
+        }))
+      : [];
+
+    const filters = Array.isArray(query.filters)
+      ? query.filters.map((fl: any) => ({
+          id: fl.id,
+          field: fl.field
+            ? {
+                id: fl.field.id || `${fl.field.tableName}.${fl.field.fieldName}`,
+                tableName: fl.field.tableName,
+                fieldName: fl.field.fieldName,
+                displayName: fl.field.alias || fl.field.fieldName,
+                dataType: fl.field.dataType,
+                aggregation: fl.field.aggregation,
+                formatting: fl.field.formatting
+              }
+            : undefined,
+          operator: fl.operator,
+          value: fl.value,
+          displayText: fl.displayText || ''
+        }))
+      : [];
+
+    const groupBy = Array.isArray(query.groupBy)
+      ? query.groupBy.map((g: any) => ({
+          id: (g.field && (g.field.id || `${g.field.tableName}.${g.field.fieldName}`)) || '',
+          tableName: g.field?.tableName,
+          fieldName: g.field?.fieldName,
+          displayName: g.field?.alias || g.field?.fieldName
+        }))
+      : [];
+
+    const sorting = Array.isArray(query.orderBy)
+      ? query.orderBy.map((o: any) => ({
+          id: (o.field && (o.field.id || `${o.field.tableName}.${o.field.fieldName}`)) || '',
+          tableName: o.field?.tableName,
+          fieldName: o.field?.fieldName,
+          displayName: o.field?.alias || o.field?.fieldName,
+          direction: o.direction === 'desc' ? 'desc' : 'asc'
+        }))
+      : [];
+
+    return {
+      ...report,
+      dataSource: report.dataSource,
+      layout,
+      selectedFields,
+      filters,
+      groupBy,
+      sorting
+    };
+  }
 }

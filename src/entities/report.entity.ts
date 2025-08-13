@@ -1,6 +1,6 @@
 import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, JoinColumn, OneToMany, CreateDateColumn, UpdateDateColumn } from "typeorm";
 import { ReportParameter } from "./report-parameter.entity";
-import { QueryConfiguration } from "src/types/query-configuration.type";
+import { FieldConfiguration, QueryConfiguration } from "src/types/query-configuration.type";
 import { User } from "./user.entity";
 import { LayoutConfiguration } from "src/types/layout-configuration.type";
 import { ReportSchedule } from "./report-schedule.entity";
@@ -56,8 +56,8 @@ export class Report {
 
     @OneToMany(() => ReportSchedule, schedule => schedule.report)
     schedules: ReportSchedule[];
-    
 
+    
     constructor(partial: Partial<Report>) {
         Object.assign(this, partial);
     }

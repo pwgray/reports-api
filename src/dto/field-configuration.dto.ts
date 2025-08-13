@@ -8,5 +8,5 @@ export class FieldConfigurationDto {
     alias: string;
 
     @IsString()
-    type: string; // e.g., 'string', 'number', 'date'
+    type: string; // e.g., 'string', 'number', 'date', 'boolean', 'currency'
 }
