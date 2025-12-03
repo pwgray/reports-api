@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Post, Body, BadRequestException } from "@nestjs/common";
+import { Controller, Get, Param, Post, Put, Delete, Body, BadRequestException } from "@nestjs/common";
 import { DataSourceService } from "./data-source.service";
 import { DatabaseSchema, exampleDatabaseSchema } from "../../types/database-schema.type";
 
@@ -12,6 +12,11 @@ export class DataSourceController {
         return this.dataSourceService.findAll();
     }
 
+    @Get(':id')
+    async getDataSource(@Param('id') id: string) {
+        return this.dataSourceService.findById(id);
+    }
+
     @Get(':id/schema')
     async getSchema(@Param('id') id: string): Promise<DatabaseSchema> {
         const dataSource = await this.dataSourceService.findById(id);
@@ -22,6 +27,18 @@ export class DataSourceController {
     async create(@Body() body: any) {
         // Expecting: { name, type, connectionString, schema? }
         return this.dataSourceService.create(body);
+    }
+
+    @Put(':id')
+    async update(@Param('id') id: string, @Body() body: any) {
+        // Expecting: { name, type, connectionString, schema? }
+        return this.dataSourceService.update(id, body);
+    }
+
+    @Delete(':id')
+    async delete(@Param('id') id: string) {
+        await this.dataSourceService.delete(id);
+        return { success: true, message: 'Data source deleted successfully' };
     }
 
     @Post('introspect')

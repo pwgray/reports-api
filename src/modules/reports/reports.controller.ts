@@ -31,6 +31,11 @@ export class ReportsController {
     await this.reportsService.deleteReport(id);
     return { success: true };
   }
+
+  @Post('preview')
+  async previewReport(@Body() reportDefinition: any) {
+    return this.reportsService.previewReport(reportDefinition);
+  }
     
     
 }
