@@ -116,25 +116,64 @@ export class ReportsService {
   }
 
   async previewReport(reportDefinition: any): Promise<any> {
+    // Validation
+    if (!reportDefinition) {
+      throw new Error('Report definition is required');
+    }
+    
+    if (!reportDefinition.dataSource || !reportDefinition.dataSource.id) {
+      throw new Error('Report must have a valid data source');
+    }
+    
+    if (!reportDefinition.selectedFields || reportDefinition.selectedFields.length === 0) {
+      throw new Error('Report must have at least one selected field');
+    }
+
+    console.log('Preview request received:', {
+      dataSourceId: reportDefinition.dataSource?.id,
+      fieldsCount: reportDefinition.selectedFields?.length,
+      filtersCount: reportDefinition.filters?.length
+    });
+
     const limit = reportDefinition.limit || 100;
     
-    // Convert report definition to QueryConfiguration
+    // Get the actual database schema to map field names correctly
+    const schema = reportDefinition.dataSource?.schema;
+    console.log('Schema available:', !!schema, 'Tables:', schema?.tables?.length);
+    const fieldMapper = this.createFieldMapper(schema);
+    
+    // Convert report definition to QueryConfiguration with correct database names
     const queryConfig = {
-      fields: (reportDefinition.selectedFields || []).map((field: any) => ({
-        tableName: field.tableName,
-        fieldName: field.fieldName,
-        alias: field.displayName || field.fieldName,
-        dataType: field.dataType,
-        aggregation: field.aggregation,
-        formatting: field.formatting
-      })),
-      tables: this.extractTablesFromFields(reportDefinition.selectedFields || []),
-      filters: (reportDefinition.filters || []).map((filter: any) => ({
-        field: filter.field,
-        operator: filter.operator,
-        value: filter.value,
-        logicalOperator: filter.logicalOperator || 'AND'
-      })),
+      fields: (reportDefinition.selectedFields || []).map((field: any) => {
+        const original = `${field.tableName}.${field.fieldName}`;
+        const correctNames = fieldMapper(field.tableName, field.fieldName);
+        const mapped = `${correctNames.tableName}.${correctNames.fieldName}`;
+        if (original !== mapped) {
+          console.log(`Field mapping: ${original} → ${mapped}`);
+        }
+        return {
+          tableName: correctNames.tableName,
+          fieldName: correctNames.fieldName,
+          alias: field.displayName || field.fieldName,
+          dataType: field.dataType,
+          aggregation: field.aggregation,
+          formatting: field.formatting
+        };
+      }),
+      tables: this.extractTablesFromFields(reportDefinition.selectedFields || []).map(t => fieldMapper(t, '').tableName),
+      filters: (reportDefinition.filters || []).map((filter: any) => {
+        const correctNames = fieldMapper(filter.field.tableName, filter.field.fieldName);
+        return {
+          field: {
+            ...filter.field,
+            tableName: correctNames.tableName,
+            fieldName: correctNames.fieldName
+          },
+          operator: filter.operator,
+          value: filter.value,
+          logicalOperator: filter.logicalOperator || 'AND'
+        };
+      }),
       groupBy: (reportDefinition.groupBy || []).map((group: any) => ({
         field: group
       })),
@@ -147,29 +186,41 @@ export class ReportsService {
       offset: 0
     };
 
-    // Build and execute query
-    const startTime = Date.now();
-    const query = await this.queryBuilderService.buildQuery(queryConfig, {});
-    const data = await this.queryBuilderService.executeQuery(
-      reportDefinition.dataSource.id,
-      query
-    );
-    const executionTime = Date.now() - startTime;
+    console.log('Query config:', JSON.stringify(queryConfig, null, 2));
 
-    // Get total count (without limit) for pagination info
-    const countQuery = await this.buildCountQuery(queryConfig);
-    const countResult = await this.queryBuilderService.executeQuery(
-      reportDefinition.dataSource.id,
-      countQuery
-    );
-    const totalRows = countResult[0]?.total || data.length;
+    try {
+      // Get database type from data source
+      const databaseType = this.mapDatabaseType(reportDefinition.dataSource.type);
+      
+      // Build and execute query
+      const startTime = Date.now();
+      const query = await this.queryBuilderService.buildQuery(queryConfig, {}, databaseType);
+      console.log('Generated SQL:', query);
+      
+      const data = await this.queryBuilderService.executeQuery(
+        reportDefinition.dataSource.id,
+        query
+      );
+      const executionTime = Date.now() - startTime;
 
-    return {
-      data,
-      totalRows,
-      executionTime,
-      query // Include query for debugging
-    };
+      // Get total count (without limit) for pagination info
+      const countQuery = await this.buildCountQuery(queryConfig, databaseType);
+      const countResult = await this.queryBuilderService.executeQuery(
+        reportDefinition.dataSource.id,
+        countQuery
+      );
+      const totalRows = countResult[0]?.total || data.length;
+
+      return {
+        data,
+        totalRows,
+        executionTime,
+        query // Include query for debugging
+      };
+    } catch (error) {
+      console.error('Preview error:', error);
+      throw error;
+    }
   }
 
   private extractTablesFromFields(fields: any[]): string[] {
@@ -182,7 +233,7 @@ export class ReportsService {
     return Array.from(tables);
   }
 
-  private async buildCountQuery(config: any): Promise<string> {
+  private async buildCountQuery(config: any, databaseType: string = 'mssql'): Promise<string> {
     // Build a COUNT(*) query with the same filters and joins
     const countConfig = {
       ...config,
@@ -197,7 +248,78 @@ export class ReportsService {
       limit: undefined,
       offset: undefined
     };
-    return this.queryBuilderService.buildQuery(countConfig, {});
+    return this.queryBuilderService.buildQuery(countConfig, {}, databaseType);
+  }
+
+  private mapDatabaseType(type: string): string {
+    const typeMap: Record<string, string> = {
+      'sqlserver': 'mssql',
+      'mssql': 'mssql',
+      'postgresql': 'postgres',
+      'postgres': 'postgres',
+      'mysql': 'mysql',
+      'mariadb': 'mariadb',
+    };
+    return typeMap[type.toLowerCase()] || 'mssql';
+  }
+
+  /**
+   * Create a field mapper function that maps normalized names to actual database names
+   */
+  private createFieldMapper(schema: any): (tableName: string, fieldName: string) => { tableName: string; fieldName: string } {
+    if (!schema || !schema.tables) {
+      // No schema available, return names as-is
+      console.warn('No schema available for field mapping');
+      return (tableName, fieldName) => ({ tableName, fieldName });
+    }
+
+    // Build a lookup map for quick access
+    const tableMap = new Map<string, any>();
+    schema.tables.forEach((table: any) => {
+      // Store by both original name and lowercase name for flexible matching
+      const lowerName = table.name.toLowerCase();
+      tableMap.set(lowerName, table);
+      tableMap.set(table.name, table);
+    });
+
+    console.log(`Field mapper created with ${tableMap.size / 2} tables`);
+
+    return (tableName: string, fieldName: string) => {
+      const lowerTableName = tableName.toLowerCase();
+      const table = tableMap.get(lowerTableName);
+      
+      if (!table) {
+        // Table not found in schema, return as-is
+        console.warn(`Table '${tableName}' not found in schema. Available tables:`, Array.from(tableMap.keys()).slice(0, 10));
+        return { tableName, fieldName };
+      }
+
+      // Get the correct table name
+      const correctTableName = table.name;
+
+      if (!fieldName) {
+        // Just mapping table name
+        return { tableName: correctTableName, fieldName };
+      }
+
+      // Find the column with matching name (case-insensitive)
+      const lowerFieldName = fieldName.toLowerCase();
+      const column = table.columns?.find((col: any) => 
+        col.name.toLowerCase() === lowerFieldName
+      );
+
+      if (!column) {
+        console.warn(`Column '${fieldName}' not found in table '${correctTableName}'. Available columns:`, 
+          table.columns?.slice(0, 5).map((c: any) => c.name));
+        return { tableName: correctTableName, fieldName };
+      }
+
+      // Return the correct database names
+      return {
+        tableName: correctTableName,
+        fieldName: column.name
+      };
+    };
   }
 
   async archiveReport(id: string): Promise<void> {

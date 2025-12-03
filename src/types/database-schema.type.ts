@@ -71,8 +71,8 @@ export interface TableSchema {
 
 export interface ColumnSchema {
   // Basic column information
-  name: string;
-  displayName?: string;
+  name: string; // Original database column name (e.g., "ProductID")
+  displayName?: string; // User-friendly display name
   description?: string;
   
   // Data type information

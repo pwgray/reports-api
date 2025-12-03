@@ -28,14 +28,16 @@ export class QueryBuilderService {
    */
   async buildQuery(
     config: QueryConfiguration,
-    parameters: Record<string, any> = {}
+    parameters: Record<string, any> = {},
+    databaseType: string = 'mssql' // Default to SQL Server
   ): Promise<string> {
     this.validateQueryConfiguration(config);
     
     let query = '';
     
-    // Build SELECT clause
-    query += this.buildSelectClause(config.fields);
+    // Build SELECT clause with TOP for SQL Server if needed
+    const useTop = databaseType === 'mssql' && config.limit && (!config.offset || config.offset === 0);
+    query += this.buildSelectClause(config.fields, useTop ? config.limit : undefined);
     
     // Build FROM clause
     query += this.buildFromClause(config.tables[0]); // Primary table
@@ -50,8 +52,8 @@ export class QueryBuilderService {
       query += this.buildWhereClause(config.filters, parameters);
     }
     
-    // Build GROUP BY clause
-    if (config.groupBy?.length) {
+    // Build GROUP BY clause (only if there are valid groupBy fields)
+    if (config.groupBy?.length && this.hasValidGroupByFields(config.groupBy)) {
       query += this.buildGroupByClause(config.groupBy);
     }
     
@@ -60,14 +62,18 @@ export class QueryBuilderService {
       query += this.buildHavingClause(config.having, parameters);
     }
     
-    // Build ORDER BY clause
-    if (config.orderBy?.length) {
+    // Build ORDER BY clause (only if there are valid orderBy fields)
+    if (config.orderBy?.length && this.hasValidOrderByFields(config.orderBy)) {
       query += this.buildOrderByClause(config.orderBy);
+    } else if (databaseType === 'mssql' && config.limit) {
+      // SQL Server requires ORDER BY when using OFFSET/FETCH
+      // Default to ordering by the first field
+      query += this.buildDefaultOrderByClause(config.fields);
     }
     
-    // Build LIMIT clause
+    // Build LIMIT clause with database-specific syntax
     if (config.limit) {
-      query += this.buildLimitClause(config.limit, config.offset);
+      query += this.buildLimitClause(config.limit, config.offset, databaseType);
     }
     
     return query.trim();
@@ -117,7 +123,7 @@ export class QueryBuilderService {
   /**
    * Build SELECT clause with field aggregations and aliases
    */
-  private buildSelectClause(fields: FieldConfiguration[]): string {
+  private buildSelectClause(fields: FieldConfiguration[], topLimit?: number): string {
     const selectFields = fields.map(field => {
       let fieldExpression = '';
       
@@ -135,7 +141,9 @@ export class QueryBuilderService {
       return `${fieldExpression} AS ${this.escapeIdentifier(field.alias)}`;
     });
     
-    return `SELECT ${selectFields.join(', ')}\n`;
+    // Add TOP for SQL Server if specified
+    const topClause = topLimit ? `TOP ${topLimit} ` : '';
+    return `SELECT ${topClause}${selectFields.join(', ')}\n`;
   }
 
   /**
@@ -256,6 +264,7 @@ export class QueryBuilderService {
         return `${fieldRef} IN (${formattedValues})`;
       
       case FilterOperator.LIKE:
+      case 'contains': // Support 'contains' as alias for LIKE
         return `${fieldRef} LIKE ${this.formatValue(`%${value}%`, FieldDataType.STRING)}`;
       
       case FilterOperator.STARTS_WITH:
@@ -315,14 +324,63 @@ export class QueryBuilderService {
   }
 
   /**
-   * Build LIMIT clause with optional offset
+   * Build default ORDER BY clause (required for SQL Server OFFSET/FETCH)
    */
-  private buildLimitClause(limit: number, offset?: number): string {
+  private buildDefaultOrderByClause(fields: FieldConfiguration[]): string {
+    if (fields.length === 0) {
+      // Fallback to (SELECT NULL) if no fields
+      return `ORDER BY (SELECT NULL)\n`;
+    }
+    
+    // Order by the first field
+    const firstField = fields[0];
+    const fieldRef = `${this.escapeIdentifier(firstField.tableName)}.${this.escapeIdentifier(firstField.fieldName)}`;
+    return `ORDER BY ${fieldRef} ASC\n`;
+  }
+
+  /**
+   * Build LIMIT clause with database-specific syntax
+   */
+  private buildLimitClause(limit: number, offset: number = 0, databaseType: string = 'mssql'): string {
+    // SQL Server: Use TOP if no offset, otherwise use OFFSET/FETCH (which requires ORDER BY)
+    if (databaseType === 'mssql') {
+      if (offset === 0) {
+        // Use TOP for simple limit without offset - doesn't require ORDER BY
+        return ''; // TOP is added to SELECT clause instead
+      } else {
+        // OFFSET/FETCH requires ORDER BY (handled in buildQuery)
+        return `OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY\n`;
+      }
+    }
+    
+    // MySQL and PostgreSQL use LIMIT syntax
     let clause = `LIMIT ${limit}`;
     if (offset) {
       clause += ` OFFSET ${offset}`;
     }
     return clause + '\n';
+  }
+
+  /**
+   * Check if groupBy array has valid fields
+   */
+  private hasValidGroupByFields(groupBy: any[]): boolean {
+    return groupBy.some(group => 
+      group.field && 
+      group.field.tableName && 
+      group.field.fieldName
+    );
+  }
+
+  /**
+   * Check if orderBy array has valid fields
+   */
+  private hasValidOrderByFields(orderBy: any[]): boolean {
+    return orderBy.some(order => 
+      order.field && 
+      order.field.tableName && 
+      order.field.fieldName
+    );
   }
 
   /**
@@ -404,8 +462,15 @@ export class QueryBuilderService {
    * Create database connection based on data source configuration
    */
   private async createConnection(dataSource: DataSource): Promise<TypeOrmDataSource> {
-    const connectionOptions = {
-      type: dataSource.type as any,
+    // Map database type names to TypeORM driver names
+    const driverType = this.mapDatabaseTypeToDriver(dataSource.type);
+    
+    // Generate unique connection name to avoid conflicts
+    const connectionName = `query_${dataSource.id}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    const connectionOptions: any = {
+      name: connectionName,
+      type: driverType,
       host: this.extractHostFromConnectionString(dataSource.connectionString),
       port: this.extractPortFromConnectionString(dataSource.connectionString),
       username: this.extractUsernameFromConnectionString(dataSource.connectionString),
@@ -416,7 +481,40 @@ export class QueryBuilderService {
       entities: [],
     };
 
+    // Add SQL Server specific options for self-signed certificates
+    if (driverType === 'mssql') {
+      connectionOptions.options = {
+        trustServerCertificate: true,  // Trust self-signed certificates
+        encrypt: true,                  // Enable encryption
+        enableArithAbort: true         // Required for some SQL Server versions
+      };
+    }
+
     return await createConnection(connectionOptions);
+  }
+
+  /**
+   * Map database type names to TypeORM driver names
+   */
+  private mapDatabaseTypeToDriver(type: string): string {
+    const typeMap: Record<string, string> = {
+      'sqlserver': 'mssql',
+      'mssql': 'mssql',
+      'postgresql': 'postgres',
+      'postgres': 'postgres',
+      'mysql': 'mysql',
+      'mariadb': 'mariadb',
+      'sqlite': 'sqlite',
+      'oracle': 'oracle',
+      'mongodb': 'mongodb'
+    };
+
+    const mappedType = typeMap[type.toLowerCase()];
+    if (!mappedType) {
+      throw new BadRequestException(`Unsupported database type: ${type}`);
+    }
+    
+    return mappedType;
   }
 
   /**

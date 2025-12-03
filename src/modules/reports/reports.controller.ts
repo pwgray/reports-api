@@ -34,6 +34,9 @@ export class ReportsController {
 
   @Post('preview')
   async previewReport(@Body() reportDefinition: any) {
+    console.log('🔥🔥🔥 PREVIEW ENDPOINT HIT! 🔥🔥🔥');
+    console.log('Report name:', reportDefinition?.name);
+    console.log('Selected fields:', reportDefinition?.selectedFields?.length);
     return this.reportsService.previewReport(reportDefinition);
   }
     
