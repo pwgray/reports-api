@@ -150,6 +150,19 @@ export class QueryBuilderService {
    * Build aggregate expression for field
    */
   private buildAggregateExpression(field: FieldConfiguration): string {
+    console.log('🔧 buildAggregateExpression called:', {
+      fieldName: field.fieldName,
+      aggregation: field.aggregation,
+      tableName: field.tableName
+    });
+
+    // Special case for COUNT(*) - handle both string comparison and enum
+    // Check fieldName first to avoid escaping asterisk
+    if (field.fieldName === '*') {
+      console.log('✅ Detected asterisk field, returning COUNT(*)');
+      return 'COUNT(*)';
+    }
+    
     const fieldRef = `${this.escapeIdentifier(field.tableName)}.${this.escapeIdentifier(field.fieldName)}`;
     
     switch (field.aggregation) {
