@@ -25,13 +25,13 @@ export class DataSourceController {
 
     @Post()
     async create(@Body() body: any) {
-        // Expecting: { name, type, connectionString, schema? }
+        // Expecting: { name, type, server, port?, database, username, password, schema? }
         return this.dataSourceService.create(body);
     }
 
     @Put(':id')
     async update(@Param('id') id: string, @Body() body: any) {
-        // Expecting: { name, type, connectionString, schema? }
+        // Expecting: { name, type, server, port?, database, username, password, schema? }
         return this.dataSourceService.update(id, body);
     }
 
@@ -42,13 +42,27 @@ export class DataSourceController {
     }
 
     @Post('introspect')
-    async introspect(@Body() body: { connectionString: string; type: string }): Promise<DatabaseSchema> {
-        // TODO: Replace with real introspection. For now, return example schema.
-        switch (body.type) {
-            case 'sqlserver':
-                return this.dataSourceService.introspect('Server=localhost;Port=1433;User ID=sa;Password=Heroguy2025!;Database=Northwind;', 'mssql');
-            default:
-                throw new BadRequestException('Invalid database type');
-        }
+    async introspect(@Body() body: { 
+        server: string; 
+        port?: number; 
+        database: string; 
+        username: string; 
+        password: string; 
+        type: string;
+        includedSchemas?: string[];
+        includedObjectTypes?: string[];
+        objectNamePattern?: string;
+    }): Promise<DatabaseSchema> {
+        return this.dataSourceService.introspect(
+            body.server, 
+            body.port, 
+            body.database, 
+            body.username, 
+            body.password, 
+            body.type,
+            body.includedSchemas,
+            body.includedObjectTypes,
+            body.objectNamePattern
+        );
     }
 }

@@ -116,6 +116,11 @@ export class ReportsService {
   }
 
   async previewReport(reportDefinition: any): Promise<any> {
+    console.log('🚀 ==== PREVIEW REPORT START ====');
+    console.log('📝 Report Definition Keys:', Object.keys(reportDefinition || {}));
+    console.log('📊 Data Source Keys:', Object.keys(reportDefinition?.dataSource || {}));
+    console.log('🗂️  Selected Fields Sample:', JSON.stringify(reportDefinition?.selectedFields?.slice(0, 2), null, 2));
+    
     // Validation
     if (!reportDefinition) {
       throw new Error('Report definition is required');
@@ -139,7 +144,12 @@ export class ReportsService {
     
     // Get the actual database schema to map field names correctly
     const schema = reportDefinition.dataSource?.schema;
-    console.log('Schema available:', !!schema, 'Tables:', schema?.tables?.length);
+    console.log('⚠️  Schema available:', !!schema, 'Tables:', schema?.tables?.length);
+    if (!schema || !schema.tables || schema.tables.length === 0) {
+      console.error('❌ NO SCHEMA AVAILABLE! Cannot map field names.');
+    } else {
+      console.log('✅ Schema tables:', schema.tables.map((t: any) => t.name).slice(0, 5));
+    }
     const fieldMapper = this.createFieldMapper(schema);
     
     // Convert report definition to QueryConfiguration with correct database names
@@ -147,11 +157,12 @@ export class ReportsService {
       fields: (reportDefinition.selectedFields || []).map((field: any) => {
         const original = `${field.tableName}.${field.fieldName}`;
         const correctNames = fieldMapper(field.tableName, field.fieldName);
-        const mapped = `${correctNames.tableName}.${correctNames.fieldName}`;
-        if (original !== mapped) {
-          console.log(`Field mapping: ${original} → ${mapped}`);
+        const mapped = `${correctNames.schemaName}.${correctNames.tableName}.${correctNames.fieldName}`;
+        if (original !== mapped.replace(`${correctNames.schemaName}.`, '')) {
+          console.log(`✨ Field mapping: ${original} → ${mapped}`);
         }
         return {
+          schemaName: correctNames.schemaName,
           tableName: correctNames.tableName,
           fieldName: correctNames.fieldName,
           alias: field.displayName || field.fieldName,
@@ -160,12 +171,16 @@ export class ReportsService {
           formatting: field.formatting
         };
       }),
-      tables: this.extractTablesFromFields(reportDefinition.selectedFields || []).map(t => fieldMapper(t, '').tableName),
+      tables: this.extractTablesFromFields(reportDefinition.selectedFields || []).map(t => {
+        const mapped = fieldMapper(t, '');
+        return mapped.schemaName ? `${mapped.schemaName}.${mapped.tableName}` : mapped.tableName;
+      }),
       filters: (reportDefinition.filters || []).map((filter: any) => {
         const correctNames = fieldMapper(filter.field.tableName, filter.field.fieldName);
         return {
           field: {
             ...filter.field,
+            schemaName: correctNames.schemaName,
             tableName: correctNames.tableName,
             fieldName: correctNames.fieldName
           },
@@ -266,10 +281,10 @@ export class ReportsService {
   /**
    * Create a field mapper function that maps normalized names to actual database names
    */
-  private createFieldMapper(schema: any): (tableName: string, fieldName: string) => { tableName: string; fieldName: string } {
+  private createFieldMapper(schema: any): (tableName: string, fieldName: string) => { schemaName?: string; tableName: string; fieldName: string } {
     if (!schema || !schema.tables) {
       // No schema available, return names as-is
-      console.warn('No schema available for field mapping');
+      console.warn('⚠️  No schema available for field mapping');
       return (tableName, fieldName) => ({ tableName, fieldName });
     }
 
@@ -282,7 +297,13 @@ export class ReportsService {
       tableMap.set(table.name, table);
     });
 
-    console.log(`Field mapper created with ${tableMap.size / 2} tables`);
+    console.log(`✅ Field mapper created with ${tableMap.size / 2} tables:`, Array.from(new Set(schema.tables.map((t: any) => `${t.schema || 'dbo'}.${t.name}`))));
+    
+    // Log first table's columns for debugging
+    if (schema.tables.length > 0) {
+      const firstTable = schema.tables[0];
+      console.log(`📋 Sample table:`, `${firstTable.schema || 'dbo'}.${firstTable.name}`, 'with columns:', firstTable.columns?.slice(0, 5).map((c: any) => c.name));
+    }
 
     return (tableName: string, fieldName: string) => {
       const lowerTableName = tableName.toLowerCase();
@@ -290,16 +311,17 @@ export class ReportsService {
       
       if (!table) {
         // Table not found in schema, return as-is
-        console.warn(`Table '${tableName}' not found in schema. Available tables:`, Array.from(tableMap.keys()).slice(0, 10));
+        console.error(`❌ Table '${tableName}' not found in schema. Available tables:`, Array.from(new Set(Array.from(tableMap.keys()).filter(k => k === k.toLowerCase()))));
         return { tableName, fieldName };
       }
 
-      // Get the correct table name
+      // Get the correct table name and schema
       const correctTableName = table.name;
+      const correctSchemaName = table.schema || 'dbo'; // Default to 'dbo' if not specified
 
       if (!fieldName) {
         // Just mapping table name
-        return { tableName: correctTableName, fieldName };
+        return { schemaName: correctSchemaName, tableName: correctTableName, fieldName };
       }
 
       // Find the column with matching name (case-insensitive)
@@ -309,16 +331,20 @@ export class ReportsService {
       );
 
       if (!column) {
-        console.warn(`Column '${fieldName}' not found in table '${correctTableName}'. Available columns:`, 
-          table.columns?.slice(0, 5).map((c: any) => c.name));
-        return { tableName: correctTableName, fieldName };
+        console.error(`❌ Column '${fieldName}' (looking for lowercase: '${lowerFieldName}') not found in table '${correctSchemaName}.${correctTableName}'.`);
+        console.error(`   Available columns:`, table.columns?.map((c: any) => `${c.name} (lowercase: ${c.name.toLowerCase()})`).slice(0, 10));
+        return { schemaName: correctSchemaName, tableName: correctTableName, fieldName };
       }
 
-      // Return the correct database names
-      return {
+      // Return the correct database names with schema
+      const result = {
+        schemaName: correctSchemaName,
         tableName: correctTableName,
         fieldName: column.name
       };
+      
+      console.log(`🔄 Mapped: ${tableName}.${fieldName} → ${result.schemaName}.${result.tableName}.${result.fieldName}`);
+      return result;
     };
   }
 

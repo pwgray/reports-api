@@ -134,8 +134,9 @@ export class QueryBuilderService {
         // Aggregated field
         fieldExpression = this.buildAggregateExpression(field);
       } else {
-        // Simple field reference
-        fieldExpression = `${this.escapeIdentifier(field.tableName)}.${this.escapeIdentifier(field.fieldName)}`;
+        // Simple field reference with schema qualification
+        const tableRef = this.buildTableReference(field.schemaName, field.tableName);
+        fieldExpression = `${tableRef}.${this.escapeIdentifier(field.fieldName)}`;
       }
       
       return `${fieldExpression} AS ${this.escapeIdentifier(field.alias)}`;
@@ -145,6 +146,17 @@ export class QueryBuilderService {
     const topClause = topLimit ? `TOP ${topLimit} ` : '';
     return `SELECT ${topClause}${selectFields.join(', ')}\n`;
   }
+  
+  /**
+   * Build a schema-qualified table reference
+   */
+  private buildTableReference(schemaName?: string, tableName?: string): string {
+    if (!tableName) return '';
+    if (schemaName) {
+      return `${this.escapeIdentifier(schemaName)}.${this.escapeIdentifier(tableName)}`;
+    }
+    return this.escapeIdentifier(tableName);
+  }
 
   /**
    * Build aggregate expression for field
@@ -153,7 +165,8 @@ export class QueryBuilderService {
     console.log('🔧 buildAggregateExpression called:', {
       fieldName: field.fieldName,
       aggregation: field.aggregation,
-      tableName: field.tableName
+      tableName: field.tableName,
+      schemaName: field.schemaName
     });
 
     // Special case for COUNT(*) - handle both string comparison and enum
@@ -163,7 +176,8 @@ export class QueryBuilderService {
       return 'COUNT(*)';
     }
     
-    const fieldRef = `${this.escapeIdentifier(field.tableName)}.${this.escapeIdentifier(field.fieldName)}`;
+    const tableRef = this.buildTableReference(field.schemaName, field.tableName);
+    const fieldRef = `${tableRef}.${this.escapeIdentifier(field.fieldName)}`;
     
     switch (field.aggregation) {
       case AggregationType.SUM:
@@ -189,6 +203,11 @@ export class QueryBuilderService {
    * Build FROM clause
    */
   private buildFromClause(tableName: string): string {
+    // Support schema.table format
+    const parts = tableName.split('.');
+    if (parts.length === 2) {
+      return `FROM ${this.buildTableReference(parts[0], parts[1])}\n`;
+    }
     return `FROM ${this.escapeIdentifier(tableName)}\n`;
   }
 
@@ -198,11 +217,14 @@ export class QueryBuilderService {
   private buildJoinClauses(joins: JoinConfiguration[]): string {
     return joins.map(join => {
       const joinType = join.type.toUpperCase();
+      const leftTableRef = this.buildTableReference(join.leftSchema, join.leftTable);
+      const rightTableRef = this.buildTableReference(join.rightSchema, join.rightTable);
+      
       const conditions = join.conditions.map(condition => {
-        return `${this.escapeIdentifier(join.leftTable)}.${this.escapeIdentifier(condition.leftField)} ${condition.operator} ${this.escapeIdentifier(join.rightTable)}.${this.escapeIdentifier(condition.rightField)}`;
+        return `${leftTableRef}.${this.escapeIdentifier(condition.leftField)} ${condition.operator} ${rightTableRef}.${this.escapeIdentifier(condition.rightField)}`;
       }).join(' AND ');
       
-      return `${joinType} JOIN ${this.escapeIdentifier(join.rightTable)} ON ${conditions}`;
+      return `${joinType} JOIN ${rightTableRef} ON ${conditions}`;
     }).join('\n') + '\n';
   }
 
@@ -250,7 +272,8 @@ export class QueryBuilderService {
     filter: FilterConfiguration,
     parameters: Record<string, any>
   ): string {
-    const fieldRef = `${this.escapeIdentifier(filter.field.tableName)}.${this.escapeIdentifier(filter.field.fieldName)}`;
+    const tableRef = this.buildTableReference(filter.field.schemaName, filter.field.tableName);
+    const fieldRef = `${tableRef}.${this.escapeIdentifier(filter.field.fieldName)}`;
     const value = filter.isParameter ? parameters[filter.parameterName!] : filter.value;
     
     switch (filter.operator) {
@@ -302,7 +325,8 @@ export class QueryBuilderService {
    */
   private buildGroupByClause(groupBy: any[]): string {
     const groupFields = groupBy.map(group => {
-      return `${this.escapeIdentifier(group.field.tableName)}.${this.escapeIdentifier(group.field.fieldName)}`;
+      const tableRef = this.buildTableReference(group.field.schemaName, group.field.tableName);
+      return `${tableRef}.${this.escapeIdentifier(group.field.fieldName)}`;
     });
     
     return `GROUP BY ${groupFields.join(', ')}\n`;
@@ -328,7 +352,7 @@ export class QueryBuilderService {
       .map(order => {
         const fieldRef = order.field.aggregation
           ? this.buildAggregateExpression(order.field)
-          : `${this.escapeIdentifier(order.field.tableName)}.${this.escapeIdentifier(order.field.fieldName)}`;
+          : `${this.buildTableReference(order.field.schemaName, order.field.tableName)}.${this.escapeIdentifier(order.field.fieldName)}`;
         
         return `${fieldRef} ${order.direction.toUpperCase()}`;
       });
@@ -347,7 +371,8 @@ export class QueryBuilderService {
     
     // Order by the first field
     const firstField = fields[0];
-    const fieldRef = `${this.escapeIdentifier(firstField.tableName)}.${this.escapeIdentifier(firstField.fieldName)}`;
+    const tableRef = this.buildTableReference(firstField.schemaName, firstField.tableName);
+    const fieldRef = `${tableRef}.${this.escapeIdentifier(firstField.fieldName)}`;
     return `ORDER BY ${fieldRef} ASC\n`;
   }
 
@@ -463,10 +488,27 @@ export class QueryBuilderService {
     }
     
     // Validate that all referenced tables in fields exist in tables array
+    // Handle both schema-qualified (dbo.Customers) and unqualified (Customers) names
     const tableNames = new Set(config.tables);
+    const unqualifiedTableNames = new Set(
+      config.tables.map(t => t.includes('.') ? t.split('.').pop() : t)
+    );
+    
     config.fields.forEach(field => {
-      if (!tableNames.has(field.tableName)) {
-        throw new BadRequestException(`Field references unknown table: ${field.tableName}`);
+      // Build the fully qualified name if schema is present
+      const fullyQualifiedName = field.schemaName 
+        ? `${field.schemaName}.${field.tableName}` 
+        : field.tableName;
+      
+      // Check if either the fully qualified name or just the table name exists
+      const isValid = tableNames.has(fullyQualifiedName) || 
+                     tableNames.has(field.tableName) ||
+                     unqualifiedTableNames.has(field.tableName);
+      
+      if (!isValid) {
+        throw new BadRequestException(
+          `Field references unknown table: ${fullyQualifiedName}. Available tables: ${Array.from(tableNames).join(', ')}`
+        );
       }
     });
   }
@@ -484,11 +526,11 @@ export class QueryBuilderService {
     const connectionOptions: any = {
       name: connectionName,
       type: driverType,
-      host: this.extractHostFromConnectionString(dataSource.connectionString),
-      port: this.extractPortFromConnectionString(dataSource.connectionString),
-      username: this.extractUsernameFromConnectionString(dataSource.connectionString),
-      password: this.extractPasswordFromConnectionString(dataSource.connectionString),
-      database: this.extractDatabaseFromConnectionString(dataSource.connectionString),
+      host: dataSource.server,
+      port: dataSource.port || this.getDefaultPort(driverType),
+      username: dataSource.username,
+      password: dataSource.password,
+      database: dataSource.database,
       synchronize: false,
       logging: false,
       entities: [],
@@ -558,30 +600,18 @@ export class QueryBuilderService {
     }
   }
 
-  // Helper methods for parsing connection strings
-  private extractHostFromConnectionString(connectionString: string): string {
-    // Implementation depends on your connection string format
-    const match = connectionString.match(/Server=([^;]+)/i);
-    return match ? match[1] : 'localhost';
-  }
-
-  private extractPortFromConnectionString(connectionString: string): number {
-    const match = connectionString.match(/Port=([^;]+)/i);
-    return match ? parseInt(match[1]) : 1433;
-  }
-
-  private extractUsernameFromConnectionString(connectionString: string): string {
-    const match = connectionString.match(/User ID=([^;]+)/i);
-    return match ? match[1] : '';
-  }
-
-  private extractPasswordFromConnectionString(connectionString: string): string {
-    const match = connectionString.match(/Password=([^;]+)/i);
-    return match ? match[1] : '';
-  }
-
-  private extractDatabaseFromConnectionString(connectionString: string): string {
-    const match = connectionString.match(/Database=([^;]+)/i);
-    return match ? match[1] : '';
+  /**
+   * Get default port for database type
+   */
+  private getDefaultPort(driverType: string): number {
+    const defaultPorts: Record<string, number> = {
+      'mssql': 1433,
+      'postgres': 5432,
+      'mysql': 3306,
+      'mariadb': 3306,
+      'oracle': 1521,
+      'mongodb': 27017
+    };
+    return defaultPorts[driverType] || 1433;
   }
 }

@@ -44,19 +44,88 @@ export class DataSourceService {
     return this.dataSourceRepository.find();
   }
 
-  async introspect(connectionString: string, type: string): Promise<DatabaseSchema> {
+  async introspect(
+    server: string, 
+    port: number | undefined, 
+    database: string, 
+    username: string, 
+    password: string, 
+    type: string,
+    includedSchemas?: string[],
+    includedObjectTypes?: string[],
+    objectNamePattern?: string
+  ): Promise<DatabaseSchema> {
 
     try {
-      const pswd = encodeURIComponent('Heroguy2025!');
-      const connection = await createConnection({
-        type: type as any,
-        url: `mssql://sa:${pswd}@localhost:1433/Northwind`,
-        options: {
+      console.log('🔍 Introspecting with filters:', { 
+        includedSchemas, 
+        includedObjectTypes, 
+        objectNamePattern 
+      });
+
+      // Map generic database type to TypeORM driver name
+      const driverType = this.mapDatabaseTypeToDriver(type);
+      
+      // Create unique connection name to avoid conflicts
+      const connectionName = `introspect_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      const connectionOptions: any = {
+        name: connectionName,
+        type: driverType,
+        host: server,
+        database: database,
+        username: username,
+        password: password,
+      };
+
+      // Add port if provided
+      if (port) {
+        connectionOptions.port = port;
+      }
+
+      // Add database-specific options
+      if (driverType === 'mssql') {
+        connectionOptions.options = {
           trustServerCertificate: true,
           encrypt: false,
           enableArithAbort: true,
-        }
-      });
+        };
+      }
+
+      const connection = await createConnection(connectionOptions);
+
+      // Build filter clauses for SQL
+      let tableFilter = 't.is_ms_shipped = 0';
+      let viewFilter = '1=1';
+      let procFilter = 'o.type IN (\'P\',\'FN\',\'IF\',\'TF\')';
+
+      // Schema filtering
+      if (includedSchemas && includedSchemas.length > 0) {
+        const schemaList = includedSchemas.map(s => `'${s.replace(/'/g, "''")}'`).join(',');
+        tableFilter += ` AND s.name IN (${schemaList})`;
+        viewFilter += ` AND s.name IN (${schemaList})`;
+        procFilter += ` AND s.name IN (${schemaList})`;
+      }
+
+      // Object name pattern filtering
+      if (objectNamePattern && objectNamePattern.trim()) {
+        const pattern = objectNamePattern.trim().replace(/'/g, "''");
+        tableFilter += ` AND t.name LIKE '${pattern}'`;
+        viewFilter += ` AND v.name LIKE '${pattern}'`;
+        procFilter += ` AND o.name LIKE '${pattern}'`;
+      }
+
+      // Object type filtering
+      const includeTableTypes = !includedObjectTypes || includedObjectTypes.length === 0 || 
+                               includedObjectTypes.includes('table') || 
+                               includedObjectTypes.includes('base_table');
+      const includeViews = !includedObjectTypes || includedObjectTypes.length === 0 || 
+                          includedObjectTypes.includes('view');
+      const includeProcedures = !includedObjectTypes || includedObjectTypes.length === 0 || 
+                               includedObjectTypes.includes('procedure') || 
+                               includedObjectTypes.includes('stored_procedure');
+
+      console.log('📊 Include types:', { includeTableTypes, includeViews, includeProcedures });
 
 
       let rows = await connection.query(`
@@ -240,12 +309,12 @@ export class DataSourceService {
               FROM sys.tables t WITH (NOLOCK)
               JOIN sys.schemas s WITH (NOLOCK) ON s.schema_id = t.schema_id
               LEFT JOIN RowCounts rc ON rc.object_id = t.object_id
-              WHERE t.is_ms_shipped = 0
+              WHERE ${tableFilter}
               ORDER BY s.name, t.name
               FOR JSON PATH
           )),
 
-          views = JSON_QUERY((
+          views = ${includeViews ? 'JSON_QUERY((' : 'NULL -- views = JSON_QUERY(('}
               SELECT
                   name = v.name,
                   [schema] = s.name,
@@ -270,11 +339,12 @@ export class DataSourceService {
               FROM sys.views v WITH (NOLOCK)
               JOIN sys.schemas s WITH (NOLOCK) ON s.schema_id = v.schema_id
               LEFT JOIN sys.sql_modules sm WITH (NOLOCK) ON sm.object_id = v.object_id
+              WHERE ${viewFilter}
               ORDER BY s.name, v.name
               FOR JSON PATH
-          )),
+          ${includeViews ? '))' : '))'}, -- end views
 
-          procedures = JSON_QUERY((
+          procedures = ${includeProcedures ? 'JSON_QUERY((' : 'NULL -- procedures = JSON_QUERY(('}
               SELECT
                   name = o.name,
                   [schema] = s.name,
@@ -303,10 +373,10 @@ export class DataSourceService {
                   ))
               FROM sys.objects o WITH (NOLOCK)
               JOIN sys.schemas s WITH (NOLOCK) ON s.schema_id = o.schema_id
-              WHERE o.type IN ('P','FN','IF','TF')
+              WHERE ${procFilter}
               ORDER BY s.name, o.name
               FOR JSON PATH
-          )),
+          ${includeProcedures ? '))' : '))'}, -- end procedures
 
           relationships = JSON_QUERY((
               SELECT
@@ -351,11 +421,25 @@ export class DataSourceService {
 		console.log('Schema rows:', rows);
 
 		const text = rows?.[0]?.json ?? rows?.[0]?.['JSON_F52E2B61-18A1-11d1-B105-00805F49916B'];
+		
+		// Close connection after introspection
+		await connection.close();
+		
 		return JSON.parse(text) as any;
 
     } catch (error) {
       console.error('Error introspecting database:', error);
       throw error;
     }
+  }
+
+  private mapDatabaseTypeToDriver(type: string): string {
+    const typeMap: { [key: string]: string } = {
+      'sqlserver': 'mssql',
+      'mysql': 'mysql',
+      'postgresql': 'postgres',
+      'oracle': 'oracle'
+    };
+    return typeMap[type.toLowerCase()] || type;
   }
 }

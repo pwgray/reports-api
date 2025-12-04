@@ -36,6 +36,9 @@ export interface FieldConfiguration {
   // Unique identifier for this field in the query
   id: string;
   
+  // Schema name (e.g., 'dbo')
+  schemaName?: string;
+  
   // Table name (e.g., 'customers')
   tableName: string;
   
@@ -65,8 +68,14 @@ export interface JoinConfiguration {
   // Type of join
   type: JoinType;
   
+  // Schema name for left table (e.g., 'dbo')
+  leftSchema?: string;
+  
   // Left table in the join
   leftTable: string;
+  
+  // Schema name for right table (e.g., 'dbo')
+  rightSchema?: string;
   
   // Right table in the join
   rightTable: string;

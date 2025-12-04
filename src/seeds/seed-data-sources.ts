@@ -30,14 +30,21 @@ async function run() {
     const schemaPath = path.join(__dirname, '../data/northwind-schema.json');
     const demoSchema: DatabaseSchema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
 
-    const connectionString =
-      process.env.MOCK_DS_CONN ||
-      'Server=localhost;Port=1433;User ID=sa;Password=YourStrong!Passw0rd;Database=northwind;';
+    // Use environment variables or defaults
+    const server = process.env.DB_SERVER || 'localhost';
+    const port = process.env.DB_PORT ? parseInt(process.env.DB_PORT) : 1433;
+    const database = process.env.DB_NAME || 'Northwind';
+    const username = process.env.DB_USER || 'sa';
+    const password = process.env.DB_PASSWORD || 'Heroguy2025!';
 
     const entity = repo.create({
       name,
       type: DatabaseType.SQLSERVER,
-      connectionString,
+      server,
+      port,
+      database,
+      username,
+      password,
       schema: demoSchema
     });
 
