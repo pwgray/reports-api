@@ -1,4 +1,5 @@
-import { Controller, Param, Get, Post, Put, Body, Delete } from "@nestjs/common";
+import { Controller, Param, Get, Post, Put, Body, Delete, Res, HttpStatus } from "@nestjs/common";
+import { Response } from 'express';
 import { ReportsService } from "./reports.service";
 import { Report } from "../../entities/report.entity";
 
@@ -38,6 +39,29 @@ export class ReportsController {
     console.log('Report name:', reportDefinition?.name);
     console.log('Selected fields:', reportDefinition?.selectedFields?.length);
     return this.reportsService.previewReport(reportDefinition);
+  }
+
+  @Post('export/excel')
+  async exportToExcel(
+    @Body() reportDefinition: any,
+    @Res() res: Response
+  ) {
+    try {
+      console.log('📊 Excel export requested for:', reportDefinition?.name);
+      const { buffer, filename } = await this.reportsService.exportToExcel(reportDefinition);
+      
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Length', buffer.length);
+      
+      res.status(HttpStatus.OK).send(buffer);
+    } catch (error) {
+      console.error('❌ Excel export error:', error);
+      res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+        message: 'Failed to export report to Excel',
+        error: error.message
+      });
+    }
   }
     
     

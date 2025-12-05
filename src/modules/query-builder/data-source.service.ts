@@ -73,7 +73,7 @@ export class DataSourceService implements OnModuleDestroy {
     if (driverType === 'mssql') {
       connectionOptions.options = {
         trustServerCertificate: true,
-        encrypt: false,
+        encrypt: true,
         enableArithAbort: true,
       };
     }

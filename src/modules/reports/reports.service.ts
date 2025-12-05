@@ -8,6 +8,7 @@ import { ReportGeneratorService } from "../report-generator/report-generator.ser
 import { Report } from "src/entities/report.entity";
 import { User } from "src/entities/user.entity";
 import { UserService } from "../users/user.service";
+import * as XLSX from 'xlsx';
 import { ReportParameter } from "src/entities/report-parameter.entity";
 import { ReportSchedule } from "src/entities/report-schedule.entity";
 
@@ -547,5 +548,68 @@ export class ReportsService {
       groupBy,
       sorting
     };
+  }
+
+  /**
+   * Export report data to Excel format
+   * Optimized for large datasets
+   */
+  async exportToExcel(reportDefinition: any): Promise<{ buffer: Buffer; filename: string }> {
+    console.log('📊 Starting Excel export for:', reportDefinition?.name);
+    const startTime = Date.now();
+
+    // Get the full dataset (up to 1 million rows)
+    const result = await this.previewReport(reportDefinition, 1000000);
+    
+    console.log(`📊 Retrieved ${result.data.length} rows for export`);
+
+    // Create workbook and worksheet
+    const workbook = XLSX.utils.book_new();
+    
+    // Prepare headers from selected fields
+    const headers = (reportDefinition.selectedFields || []).map((field: any) => 
+      field.displayName || field.fieldName
+    );
+    
+    // Prepare data rows
+    const rows = result.data.map((row: any) => {
+      return (reportDefinition.selectedFields || []).map((field: any) => {
+        const key = field.displayName || field.fieldName;
+        return row[key] ?? '';
+      });
+    });
+    
+    // Create worksheet from data
+    const worksheetData = [headers, ...rows];
+    const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
+    
+    // Auto-size columns
+    const columnWidths = headers.map((header: string, index: number) => {
+      const headerLength = header.length;
+      const maxDataLength = Math.max(
+        ...rows.map((row: any[]) => {
+          const cellValue = String(row[index] || '');
+          return cellValue.length;
+        }).slice(0, 100) // Sample first 100 rows for performance
+      );
+      return { wch: Math.min(Math.max(headerLength, maxDataLength) + 2, 50) };
+    });
+    worksheet['!cols'] = columnWidths;
+    
+    // Add worksheet to workbook
+    const sheetName = reportDefinition.name?.substring(0, 31) || 'Report'; // Excel sheet name limit
+    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+    
+    // Generate buffer
+    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    
+    const exportTime = Date.now() - startTime;
+    console.log(`✅ Excel export completed in ${exportTime}ms - ${result.data.length} rows, ${buffer.length} bytes`);
+    
+    // Generate filename
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+    const filename = `${reportDefinition.name || 'report'}_${timestamp}.xlsx`;
+    
+    return { buffer, filename };
   }
 }
