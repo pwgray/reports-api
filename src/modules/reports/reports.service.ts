@@ -537,26 +537,52 @@ export class ReportsService {
         }))
       : [];
 
+    console.log('📦 Raw groupBy from DB:', JSON.stringify(query.groupBy, null, 2));
+    console.log('🔀 Raw orderBy from DB:', JSON.stringify(query.orderBy, null, 2));
+
     const groupBy = Array.isArray(query.groupBy)
-      ? query.groupBy.map((g: any) => ({
-          id: (g.field && (g.field.id || `${g.field.tableName}.${g.field.fieldName}`)) || '',
-          tableName: g.field?.tableName,
-          fieldName: g.field?.fieldName,
-          displayName: g.field?.alias || g.field?.fieldName,
-          schema: g.field?.schemaName || g.field?.schema // ✅ Preserve schema
-        }))
+      ? query.groupBy.map((g: any) => {
+          console.log('  Processing groupBy item:', g);
+          
+          // Handle both formats: {field: {...}} and {...} directly
+          const fieldData = g.field || g;
+          
+          const mapped = {
+            id: fieldData.id || (fieldData.tableName && fieldData.fieldName ? `${fieldData.tableName}.${fieldData.fieldName}` : ''),
+            tableName: fieldData.tableName,
+            fieldName: fieldData.fieldName,
+            displayName: fieldData.displayName || fieldData.alias || fieldData.fieldName,
+            schema: fieldData.schema || fieldData.schemaName
+          };
+          
+          console.log('  Mapped groupBy:', mapped);
+          return mapped;
+        })
       : [];
 
     const sorting = Array.isArray(query.orderBy)
-      ? query.orderBy.map((o: any) => ({
-          id: (o.field && (o.field.id || `${o.field.tableName}.${o.field.fieldName}`)) || '',
-          tableName: o.field?.tableName,
-          fieldName: o.field?.fieldName,
-          displayName: o.field?.alias || o.field?.fieldName,
-          direction: o.direction === 'desc' ? 'desc' : 'asc',
-          schema: o.field?.schemaName || o.field?.schema // ✅ Preserve schema
-        }))
+      ? query.orderBy.map((o: any) => {
+          console.log('  Processing orderBy item:', o);
+          
+          // Handle both formats: {field: {...}, direction: ...} and {..., direction: ...} directly
+          const fieldData = o.field || o;
+          
+          const mapped = {
+            id: fieldData.id || (fieldData.tableName && fieldData.fieldName ? `${fieldData.tableName}.${fieldData.fieldName}` : ''),
+            tableName: fieldData.tableName,
+            fieldName: fieldData.fieldName,
+            displayName: fieldData.displayName || fieldData.alias || fieldData.fieldName,
+            direction: o.direction === 'desc' ? 'desc' : 'asc',
+            schema: fieldData.schema || fieldData.schemaName
+          };
+          
+          console.log('  Mapped orderBy:', mapped);
+          return mapped;
+        })
       : [];
+    
+    console.log('📦 Final groupBy:', JSON.stringify(groupBy, null, 2));
+    console.log('🔀 Final sorting:', JSON.stringify(sorting, null, 2));
 
     return {
       ...report,
