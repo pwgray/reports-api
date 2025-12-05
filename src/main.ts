@@ -1,12 +1,20 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
+import * as bodyParser from 'body-parser';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.setGlobalPrefix('api');
   app.useGlobalPipes(new ValidationPipe());
   app.enableCors();
+
+  app.use(bodyParser.json({ limit: '10mb' }));
+  app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
+  app.use(bodyParser.text({ limit: '10mb' }));
+  app.use(bodyParser.raw({ limit: '10mb' }));
+  app.use(bodyParser.text({ limit: '10mb' }));
+  
   await app.listen(process.env.PORT || 3000);
 }
 bootstrap();

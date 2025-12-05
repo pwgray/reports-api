@@ -1,15 +1,110 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { createConnection, Repository } from 'typeorm';
+import { DataSource as TypeORMDataSource, Repository } from 'typeorm';
 import { DataSource } from '../../entities/data-source.entity';
 import { DatabaseSchema, DatabaseType } from 'src/types/database-schema.type';
 
 @Injectable()
-export class DataSourceService {
+export class DataSourceService implements OnModuleDestroy {
+  private connectionCache = new Map<string, TypeORMDataSource>();
+
   constructor(
     @InjectRepository(DataSource)
     private readonly dataSourceRepository: Repository<DataSource>
   ) { }
+
+  /**
+   * Generate a unique cache key for a database connection
+   */
+  private generateConnectionKey(
+    server: string,
+    port: number | undefined,
+    database: string,
+    username: string,
+    type: string
+  ): string {
+    return `${type}://${username}@${server}:${port || 'default'}/${database}`;
+  }
+
+  /**
+   * Get or create a reusable database connection
+   */
+  private async getOrCreateConnection(
+    server: string,
+    port: number | undefined,
+    database: string,
+    username: string,
+    password: string,
+    type: string
+  ): Promise<TypeORMDataSource> {
+    const connectionKey = this.generateConnectionKey(server, port, database, username, type);
+
+    // Check if connection exists and is still connected
+    if (this.connectionCache.has(connectionKey)) {
+      const existingConnection = this.connectionCache.get(connectionKey);
+      if (existingConnection && existingConnection.isInitialized) {
+        console.log('♻️  Reusing existing database connection:', connectionKey);
+        return existingConnection;
+      } else {
+        // Remove stale connection from cache
+        this.connectionCache.delete(connectionKey);
+      }
+    }
+
+    // Create new connection
+    console.log('🔌 Creating new database connection:', connectionKey);
+    const driverType = this.mapDatabaseTypeToDriver(type);
+
+    const connectionOptions: any = {
+      type: driverType,
+      host: server,
+      database: database,
+      username: username,
+      password: password,
+      ...(process.env.DB_DOMAIN && process.env.DB_DOMAIN.trim() !== '' && { domain: process.env.DB_DOMAIN }),
+    };
+
+    // Add port if provided
+    if (port) {
+      connectionOptions.port = port;
+    }
+
+    // Add database-specific options
+    if (driverType === 'mssql') {
+      connectionOptions.options = {
+        trustServerCertificate: true,
+        encrypt: false,
+        enableArithAbort: true,
+      };
+    }
+
+    const dataSource = new TypeORMDataSource(connectionOptions);
+    await dataSource.initialize();
+
+    // Cache the connection for reuse
+    this.connectionCache.set(connectionKey, dataSource);
+
+    return dataSource;
+  }
+
+  /**
+   * Cleanup method to close all cached connections when module is destroyed
+   */
+  async onModuleDestroy() {
+    console.log('🧹 Cleaning up database connections...');
+    const closePromises = Array.from(this.connectionCache.values()).map(async (connection) => {
+      if (connection.isInitialized) {
+        try {
+          await connection.destroy();
+        } catch (error) {
+          console.error('Error closing connection:', error);
+        }
+      }
+    });
+    await Promise.all(closePromises);
+    this.connectionCache.clear();
+    console.log('✅ All connections closed');
+  }
 
   async findById(id: string): Promise<DataSource> {
     const dataSource = await this.dataSourceRepository.findOne({
@@ -50,11 +145,13 @@ export class DataSourceService {
     database: string, 
     username: string, 
     password: string, 
-    type: string,
+    type: string,    
     includedSchemas?: string[],
     includedObjectTypes?: string[],
     objectNamePattern?: string
   ): Promise<DatabaseSchema> {
+
+    let connection: TypeORMDataSource | null = null;
 
     try {
       console.log('🔍 Introspecting with filters:', { 
@@ -63,36 +160,15 @@ export class DataSourceService {
         objectNamePattern 
       });
 
-      // Map generic database type to TypeORM driver name
-      const driverType = this.mapDatabaseTypeToDriver(type);
-      
-      // Create unique connection name to avoid conflicts
-      const connectionName = `introspect_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      
-      const connectionOptions: any = {
-        name: connectionName,
-        type: driverType,
-        host: server,
-        database: database,
-        username: username,
-        password: password,
-      };
-
-      // Add port if provided
-      if (port) {
-        connectionOptions.port = port;
-      }
-
-      // Add database-specific options
-      if (driverType === 'mssql') {
-        connectionOptions.options = {
-          trustServerCertificate: true,
-          encrypt: false,
-          enableArithAbort: true,
-        };
-      }
-
-      const connection = await createConnection(connectionOptions);
+      // Get or create a reusable connection
+      connection = await this.getOrCreateConnection(
+        server,
+        port,
+        database,
+        username,
+        password,
+        type
+      );
 
       // Build filter clauses for SQL
       let tableFilter = 't.is_ms_shipped = 0';
@@ -127,6 +203,73 @@ export class DataSourceService {
 
       console.log('📊 Include types:', { includeTableTypes, includeViews, includeProcedures });
 
+
+      // Build the main query conditionally
+      const viewsQuery = includeViews ? `
+          views = JSON_QUERY((
+              SELECT
+                  name = v.name,
+                  [schema] = s.name,
+                  displayName = NULL,
+                  description = NULL,
+                  definition = sm.definition,
+                  isUpdatable = CAST(OBJECTPROPERTY(v.object_id, 'IsUpdateable') AS bit),
+                  columns = JSON_QUERY((
+                      SELECT
+                          name = c.name,
+                          dataType = ty.name,
+                          normalizedType = ISNULL(tm.normalizedType,'string'),
+                          isNullable = CAST(c.is_nullable AS bit),
+                          ordinalPosition = c.column_id
+                      FROM sys.columns c WITH (NOLOCK)
+                      JOIN sys.types ty WITH (NOLOCK) ON ty.user_type_id = c.user_type_id
+                      LEFT JOIN TypeMap tm ON tm.type_name = ty.name
+                      WHERE c.object_id = v.object_id
+                      ORDER BY c.column_id
+                      FOR JSON PATH
+                  ))
+              FROM sys.views v WITH (NOLOCK)
+              JOIN sys.schemas s WITH (NOLOCK) ON s.schema_id = v.schema_id
+              LEFT JOIN sys.sql_modules sm WITH (NOLOCK) ON sm.object_id = v.object_id
+              WHERE ${viewFilter}
+              ORDER BY s.name, v.name
+              FOR JSON PATH
+          )),` : 'views = NULL,';
+
+      const proceduresQuery = includeProcedures ? `
+          procedures = JSON_QUERY((
+              SELECT
+                  name = o.name,
+                  [schema] = s.name,
+                  displayName = NULL,
+                  description = NULL,
+                  type = CASE
+                      WHEN o.type IN ('P') THEN 'stored_procedure'
+                      WHEN o.type IN ('FN','IF','TF') THEN 'function'
+                      ELSE 'stored_procedure'
+                  END,
+                  parameters = JSON_QUERY((
+                      SELECT
+                          name = prm.name,
+                          dataType = ty.name,
+                          normalizedType = ISNULL(tm.normalizedType,'string'),
+                          isOutput = CAST(prm.is_output AS bit),
+                          isOptional = CAST(prm.has_default_value AS bit),
+                          defaultValue = NULL,
+                          description = NULL
+                      FROM sys.parameters prm WITH (NOLOCK)
+                      JOIN sys.types ty WITH (NOLOCK) ON ty.user_type_id = prm.user_type_id
+                      LEFT JOIN TypeMap tm ON tm.type_name = ty.name
+                      WHERE prm.object_id = o.object_id
+                      ORDER BY prm.parameter_id
+                      FOR JSON PATH
+                  ))
+              FROM sys.objects o WITH (NOLOCK)
+              JOIN sys.schemas s WITH (NOLOCK) ON s.schema_id = o.schema_id
+              WHERE ${procFilter}
+              ORDER BY s.name, o.name
+              FOR JSON PATH
+          )),` : 'procedures = NULL,';
 
       let rows = await connection.query(`
         SET NOCOUNT ON;
@@ -314,69 +457,9 @@ export class DataSourceService {
               FOR JSON PATH
           )),
 
-          views = ${includeViews ? 'JSON_QUERY((' : 'NULL -- views = JSON_QUERY(('}
-              SELECT
-                  name = v.name,
-                  [schema] = s.name,
-                  displayName = NULL,
-                  description = NULL,
-                  definition = sm.definition,
-                  isUpdatable = CAST(OBJECTPROPERTY(v.object_id, 'IsUpdateable') AS bit),
-                  columns = JSON_QUERY((
-                      SELECT
-                          name = c.name,
-                          dataType = ty.name,
-                          normalizedType = ISNULL(tm.normalizedType,'string'),
-                          isNullable = CAST(c.is_nullable AS bit),
-                          ordinalPosition = c.column_id
-                      FROM sys.columns c WITH (NOLOCK)
-                      JOIN sys.types ty WITH (NOLOCK) ON ty.user_type_id = c.user_type_id
-                      LEFT JOIN TypeMap tm ON tm.type_name = ty.name
-                      WHERE c.object_id = v.object_id
-                      ORDER BY c.column_id
-                      FOR JSON PATH
-                  ))
-              FROM sys.views v WITH (NOLOCK)
-              JOIN sys.schemas s WITH (NOLOCK) ON s.schema_id = v.schema_id
-              LEFT JOIN sys.sql_modules sm WITH (NOLOCK) ON sm.object_id = v.object_id
-              WHERE ${viewFilter}
-              ORDER BY s.name, v.name
-              FOR JSON PATH
-          ${includeViews ? '))' : '))'}, -- end views
+          ${viewsQuery}
 
-          procedures = ${includeProcedures ? 'JSON_QUERY((' : 'NULL -- procedures = JSON_QUERY(('}
-              SELECT
-                  name = o.name,
-                  [schema] = s.name,
-                  displayName = NULL,
-                  description = NULL,
-                  type = CASE
-                      WHEN o.type IN ('P') THEN 'stored_procedure'
-                      WHEN o.type IN ('FN','IF','TF') THEN 'function'
-                      ELSE 'stored_procedure'
-                  END,
-                  parameters = JSON_QUERY((
-                      SELECT
-                          name = prm.name,
-                          dataType = ty.name,
-                          normalizedType = ISNULL(tm.normalizedType,'string'),
-                          isOutput = CAST(prm.is_output AS bit),
-                          isOptional = CAST(prm.has_default_value AS bit),
-                          defaultValue = NULL,
-                          description = NULL
-                      FROM sys.parameters prm WITH (NOLOCK)
-                      JOIN sys.types ty WITH (NOLOCK) ON ty.user_type_id = prm.user_type_id
-                      LEFT JOIN TypeMap tm ON tm.type_name = ty.name
-                      WHERE prm.object_id = o.object_id
-                      ORDER BY prm.parameter_id
-                      FOR JSON PATH
-                  ))
-              FROM sys.objects o WITH (NOLOCK)
-              JOIN sys.schemas s WITH (NOLOCK) ON s.schema_id = o.schema_id
-              WHERE ${procFilter}
-              ORDER BY s.name, o.name
-              FOR JSON PATH
-          ${includeProcedures ? '))' : '))'}, -- end procedures
+          ${proceduresQuery}
 
           relationships = JSON_QUERY((
               SELECT
@@ -422,13 +505,26 @@ export class DataSourceService {
 
 		const text = rows?.[0]?.json ?? rows?.[0]?.['JSON_F52E2B61-18A1-11d1-B105-00805F49916B'];
 		
-		// Close connection after introspection
-		await connection.close();
+		// Connection is cached and reused, so we don't close it here
 		
 		return JSON.parse(text) as any;
 
     } catch (error) {
       console.error('Error introspecting database:', error);
+      
+      // If connection was just created and error occurred, remove it from cache
+      if (connection) {
+        const connectionKey = this.generateConnectionKey(server, port, database, username, type);
+        if (this.connectionCache.has(connectionKey)) {
+          try {
+            await connection.destroy();
+          } catch (closeError) {
+            console.error('Error closing failed connection:', closeError);
+          }
+          this.connectionCache.delete(connectionKey);
+        }
+      }
+      
       throw error;
     }
   }

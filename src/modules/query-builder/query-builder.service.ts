@@ -531,6 +531,7 @@ export class QueryBuilderService {
       username: dataSource.username,
       password: dataSource.password,
       database: dataSource.database,
+      ...(process.env.DB_DOMAIN && process.env.DB_DOMAIN.trim() !== '' && { domain: process.env.DB_DOMAIN }),
       synchronize: false,
       logging: false,
       entities: [],

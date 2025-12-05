@@ -9,6 +9,7 @@ export default registerAs('database', (): SqlServerConnectionOptions => ({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME || 'reports_db',
   schema: process.env.DB_SCHEMA || 'dbo',
+  ...(process.env.DB_DOMAIN && process.env.DB_DOMAIN.trim() !== '' && { domain: process.env.DB_DOMAIN }),
   options: {
     encrypt: true,
     trustServerCertificate: true,

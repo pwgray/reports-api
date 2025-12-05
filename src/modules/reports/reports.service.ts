@@ -119,7 +119,7 @@ export class ReportsService {
     console.log('🚀 ==== PREVIEW REPORT START ====');
     console.log('📝 Report Definition Keys:', Object.keys(reportDefinition || {}));
     console.log('📊 Data Source Keys:', Object.keys(reportDefinition?.dataSource || {}));
-    console.log('🗂️  Selected Fields Sample:', JSON.stringify(reportDefinition?.selectedFields?.slice(0, 2), null, 2));
+    console.log('🗂️  ALL Selected Fields Received:', JSON.stringify(reportDefinition?.selectedFields, null, 2));
     
     // Validation
     if (!reportDefinition) {
@@ -155,12 +155,37 @@ export class ReportsService {
     // Convert report definition to QueryConfiguration with correct database names
     const queryConfig = {
       fields: (reportDefinition.selectedFields || []).map((field: any) => {
+        console.log(`🔧 Processing field:`, JSON.stringify(field, null, 2));
+        
+        // If field already has a schema, use it directly without remapping
+        if (field.schema) {
+          console.log(`✅ Field already has schema: ${field.schema}.${field.tableName}.${field.fieldName}`);
+          return {
+            schemaName: field.schema,
+            tableName: field.tableName,
+            fieldName: field.fieldName,
+            alias: field.displayName || field.fieldName,
+            dataType: field.dataType,
+            aggregation: field.aggregation,
+            formatting: field.formatting
+          };
+        }
+        
+        // Otherwise, use the field mapper to look it up
         const original = `${field.tableName}.${field.fieldName}`;
         const correctNames = fieldMapper(field.tableName, field.fieldName);
         const mapped = `${correctNames.schemaName}.${correctNames.tableName}.${correctNames.fieldName}`;
+        
+        console.log(`🔧 Field mapping result (no schema in field):`, {
+          original,
+          mapped,
+          mappedSchema: correctNames.schemaName
+        });
+        
         if (original !== mapped.replace(`${correctNames.schemaName}.`, '')) {
           console.log(`✨ Field mapping: ${original} → ${mapped}`);
         }
+        
         return {
           schemaName: correctNames.schemaName,
           tableName: correctNames.tableName,
@@ -218,6 +243,14 @@ export class ReportsService {
       );
       const executionTime = Date.now() - startTime;
 
+      console.log('📤 Query result - rows returned:', data?.length || 0);
+      if (data && data.length > 0) {
+        console.log('📋 First row keys:', Object.keys(data[0]));
+        console.log('📋 First row sample:', JSON.stringify(data[0]));
+      } else {
+        console.log('⚠️  NO DATA RETURNED FROM QUERY!');
+      }
+
       // Get total count (without limit) for pagination info
       const countQuery = await this.buildCountQuery(queryConfig, databaseType);
       const countResult = await this.queryBuilderService.executeQuery(
@@ -225,6 +258,8 @@ export class ReportsService {
         countQuery
       );
       const totalRows = countResult[0]?.total || data.length;
+
+      console.log('📊 Response being sent:', { dataRows: data?.length, totalRows, executionTime });
 
       return {
         data,
