@@ -220,7 +220,9 @@ export enum FieldDataType {
   TIME = 'time',
   BOOLEAN = 'boolean',
   TEXT = 'text',
-  JSON = 'json'
+  JSON = 'json',
+  BINARY = 'binary',
+  UUID = 'uuid'
 }
 
 export enum AggregationType {

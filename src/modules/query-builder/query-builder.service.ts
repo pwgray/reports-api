@@ -52,9 +52,10 @@ export class QueryBuilderService {
       query += this.buildWhereClause(config.filters, parameters);
     }
     
-    // Build GROUP BY clause (only if there are valid groupBy fields)
-    if (config.groupBy?.length && this.hasValidGroupByFields(config.groupBy)) {
-      query += this.buildGroupByClause(config.groupBy);
+    // Build GROUP BY clause - automatically handle when aggregations are present
+    const groupByClause = this.buildIntelligentGroupByClause(config.fields, config.groupBy);
+    if (groupByClause) {
+      query += groupByClause;
     }
     
     // Build HAVING clause
@@ -151,8 +152,10 @@ export class QueryBuilderService {
    * Build a schema-qualified table reference
    */
   private buildTableReference(schemaName?: string, tableName?: string): string {
-    if (!tableName) return '';
-    if (schemaName) {
+    if (!tableName || tableName === 'undefined') {
+      throw new BadRequestException('Table name is required and cannot be undefined');
+    }
+    if (schemaName && schemaName !== 'undefined') {
       return `${this.escapeIdentifier(schemaName)}.${this.escapeIdentifier(tableName)}`;
     }
     return this.escapeIdentifier(tableName);
@@ -169,13 +172,18 @@ export class QueryBuilderService {
       schemaName: field.schemaName
     });
 
+    // Validate field has required properties
+    if (!field.fieldName || field.fieldName === 'undefined') {
+      throw new BadRequestException('Field name is required for aggregation and cannot be undefined');
+    }
+
     // Special case for COUNT(*) - handle both string comparison and enum
     // Check fieldName first to avoid escaping asterisk
     if (field.fieldName === '*') {
       console.log('✅ Detected asterisk field, returning COUNT(*)');
       return 'COUNT(*)';
     }
-    
+
     const tableRef = this.buildTableReference(field.schemaName, field.tableName);
     const fieldRef = `${tableRef}.${this.escapeIdentifier(field.fieldName)}`;
     
@@ -333,6 +341,60 @@ export class QueryBuilderService {
   }
 
   /**
+   * Intelligently build GROUP BY clause based on field aggregations
+   * When aggregations are present, non-aggregated fields must be in GROUP BY
+   */
+  private buildIntelligentGroupByClause(
+    fields: FieldConfiguration[],
+    explicitGroupBy?: any[]
+  ): string {
+    // Check if any fields have aggregations
+    const hasAggregations = fields.some(field => field.aggregation);
+    
+    if (!hasAggregations) {
+      // No aggregations, no GROUP BY needed
+      return '';
+    }
+    
+    // Collect all non-aggregated fields that need to be in GROUP BY
+    const groupByFields: string[] = [];
+    const groupBySet = new Set<string>(); // To avoid duplicates
+    
+    fields.forEach(field => {
+      // Skip aggregated fields and custom expressions
+      if (!field.aggregation && !field.expression) {
+        const tableRef = this.buildTableReference(field.schemaName, field.tableName);
+        const fieldRef = `${tableRef}.${this.escapeIdentifier(field.fieldName)}`;
+        
+        if (!groupBySet.has(fieldRef)) {
+          groupBySet.add(fieldRef);
+          groupByFields.push(fieldRef);
+        }
+      }
+    });
+    
+    // Add explicitly specified GROUP BY fields
+    if (explicitGroupBy?.length) {
+      explicitGroupBy.forEach(group => {
+        const tableRef = this.buildTableReference(group.field.schemaName, group.field.tableName);
+        const fieldRef = `${tableRef}.${this.escapeIdentifier(group.field.fieldName)}`;
+        
+        if (!groupBySet.has(fieldRef)) {
+          groupBySet.add(fieldRef);
+          groupByFields.push(fieldRef);
+        }
+      });
+    }
+    
+    // If we have fields to group by, build the clause
+    if (groupByFields.length > 0) {
+      return `GROUP BY ${groupByFields.join(', ')}\n`;
+    }
+    
+    return '';
+  }
+
+  /**
    * Build HAVING clause (similar to WHERE but for grouped results)
    */
   private buildHavingClause(
@@ -429,26 +491,53 @@ export class QueryBuilderService {
       return 'NULL';
     }
     
+    // If value is actually a string but dataType suggests otherwise, treat as string
+    // This handles cases where type detection might be wrong
+    const isActuallyString = typeof value === 'string' && isNaN(Number(value));
+    
     switch (dataType) {
       case FieldDataType.STRING:
       case FieldDataType.TEXT:
+      case FieldDataType.UUID:
         return `'${value.toString().replace(/'/g, "''")}'`; // Escape single quotes
       
       case FieldDataType.DATE:
       case FieldDataType.DATETIME:
-        return `'${value}'`;
+      case FieldDataType.TIME:
+        return `'${value.toString().replace(/'/g, "''")}'`;
       
       case FieldDataType.NUMBER:
       case FieldDataType.INTEGER:
       case FieldDataType.DECIMAL:
       case FieldDataType.CURRENCY:
+        // If the value is actually a string (not a numeric string), quote it
+        if (isActuallyString) {
+          return `'${value.toString().replace(/'/g, "''")}'`;
+        }
         return value.toString();
       
       case FieldDataType.BOOLEAN:
-        return value ? '1' : '0';
+        // Handle boolean values
+        if (typeof value === 'boolean') {
+          return value ? '1' : '0';
+        }
+        // Handle string representations of boolean
+        if (value.toString().toLowerCase() === 'true') return '1';
+        if (value.toString().toLowerCase() === 'false') return '0';
+        return value.toString();
+      
+      case FieldDataType.JSON:
+        // JSON values should be stringified and quoted
+        const jsonValue = typeof value === 'string' ? value : JSON.stringify(value);
+        return `'${jsonValue.replace(/'/g, "''")}'`;
+      
+      case FieldDataType.BINARY:
+        // Binary data should be quoted (typically hex string representation)
+        return `'${value.toString().replace(/'/g, "''")}'`;
       
       default:
-        return `'${value.toString()}'`;
+        // Default to quoting as string for safety
+        return `'${value.toString().replace(/'/g, "''")}'`;
     }
   }
 
@@ -456,6 +545,9 @@ export class QueryBuilderService {
    * Escape SQL identifiers (table names, column names)
    */
   private escapeIdentifier(identifier: string): string {
+    if (!identifier || identifier === 'undefined' || identifier === 'null') {
+      throw new BadRequestException(`Invalid identifier: "${identifier}". Field or table name cannot be undefined or null.`);
+    }
     // Use square brackets for SQL Server, backticks for MySQL, double quotes for PostgreSQL
     return `[${identifier}]`; // SQL Server style
   }
@@ -487,6 +579,27 @@ export class QueryBuilderService {
       throw new BadRequestException('Query must specify at least one table');
     }
     
+    // Validate field properties for undefined/null values
+    config.fields.forEach((field, index) => {
+      if (!field.fieldName || field.fieldName === 'undefined' || field.fieldName === 'null') {
+        throw new BadRequestException(
+          `Field at index ${index} has invalid fieldName: "${field.fieldName}". Field name cannot be undefined or null.`
+        );
+      }
+      
+      if (!field.tableName || field.tableName === 'undefined' || field.tableName === 'null') {
+        throw new BadRequestException(
+          `Field "${field.fieldName}" at index ${index} has invalid tableName: "${field.tableName}". Table name cannot be undefined or null.`
+        );
+      }
+
+      if (!field.alias || field.alias === 'undefined' || field.alias === 'null') {
+        throw new BadRequestException(
+          `Field "${field.fieldName}" at index ${index} has invalid alias: "${field.alias}". Alias cannot be undefined or null.`
+        );
+      }
+    });
+    
     // Validate that all referenced tables in fields exist in tables array
     // Handle both schema-qualified (dbo.Customers) and unqualified (Customers) names
     const tableNames = new Set(config.tables);
@@ -511,6 +624,24 @@ export class QueryBuilderService {
         );
       }
     });
+
+    // Validate aggregation consistency
+    this.validateAggregationConsistency(config.fields);
+  }
+
+  /**
+   * Validate that aggregation usage is consistent
+   * This provides helpful error messages but the query will still work due to automatic GROUP BY
+   */
+  private validateAggregationConsistency(fields: FieldConfiguration[]): void {
+    const hasAggregations = fields.some(field => field.aggregation);
+    const hasNonAggregated = fields.some(field => !field.aggregation && !field.expression);
+    
+    if (hasAggregations && hasNonAggregated) {
+      // This is actually OK now because we auto-handle GROUP BY
+      // Just log for debugging purposes
+      console.log('Query has mixed aggregations - non-aggregated fields will be automatically grouped');
+    }
   }
 
   /**

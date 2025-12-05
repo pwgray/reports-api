@@ -155,21 +155,36 @@ export class ReportsService {
     
     // Convert report definition to QueryConfiguration with correct database names
     const queryConfig = {
-      fields: (reportDefinition.selectedFields || []).map((field: any) => {
+      fields: (reportDefinition.selectedFields || []).map((field: any, index: number) => {
         console.log(`🔧 Processing field:`, JSON.stringify(field, null, 2));
+        
+        // Validate field has required properties
+        if (!field.tableName || field.tableName === 'undefined') {
+          throw new Error(`Field at index ${index} has invalid tableName: "${field.tableName}". Please check the field configuration.`);
+        }
+        if (!field.fieldName || field.fieldName === 'undefined') {
+          throw new Error(`Field at index ${index} has invalid fieldName: "${field.fieldName}". Please check the field configuration.`);
+        }
         
         // If field already has a schema, use it directly without remapping
         if (field.schema) {
           console.log(`✅ Field already has schema: ${field.schema}.${field.tableName}.${field.fieldName}`);
-          return {
-            schemaName: field.schema,
-            tableName: field.tableName,
-            fieldName: field.fieldName,
-            alias: field.displayName || field.fieldName,
-            dataType: field.dataType,
-            aggregation: field.aggregation,
-            formatting: field.formatting
-          };
+          
+          // Double-check schema is not undefined
+          if (field.schema === 'undefined') {
+            console.warn(`⚠️  Field has schema set to "undefined", will use field mapper instead`);
+            // Fall through to mapper logic below
+          } else {
+            return {
+              schemaName: field.schema,
+              tableName: field.tableName,
+              fieldName: field.fieldName,
+              alias: field.displayName || field.fieldName,
+              dataType: field.dataType,
+              aggregation: field.aggregation,
+              formatting: field.formatting
+            };
+          }
         }
         
         // Otherwise, use the field mapper to look it up
@@ -212,14 +227,18 @@ export class ReportsService {
           logicalOperator: filter.logicalOperator || 'AND'
         };
       }),
-      groupBy: (reportDefinition.groupBy || []).map((group: any) => ({
-        field: group
-      })),
-      orderBy: (reportDefinition.sorting || []).map((sort: any) => ({
-        field: sort,
-        direction: sort.direction || 'asc',
-        priority: sort.priority || 0
-      })),
+      groupBy: (reportDefinition.groupBy || [])
+        .filter((group: any) => group && group.fieldName && group.tableName) // Filter out empty/invalid entries
+        .map((group: any) => ({
+          field: group
+        })),
+      orderBy: (reportDefinition.sorting || [])
+        .filter((sort: any) => sort && sort.fieldName && sort.tableName) // Filter out empty/invalid entries
+        .map((sort: any) => ({
+          field: sort,
+          direction: sort.direction || 'asc',
+          priority: sort.priority || 0
+        })),
       limit: limit,
       offset: 0
     };
@@ -559,7 +578,7 @@ export class ReportsService {
     const startTime = Date.now();
 
     // Get the full dataset (up to 1 million rows)
-    const result = await this.previewReport(reportDefinition, 1000000);
+    const result = await this.previewReport(reportDefinition);
     
     console.log(`📊 Retrieved ${result.data.length} rows for export`);
 
