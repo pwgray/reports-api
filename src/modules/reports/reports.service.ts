@@ -196,10 +196,7 @@ export class ReportsService {
           formatting: field.formatting
         };
       }),
-      tables: this.extractTablesFromFields(reportDefinition.selectedFields || []).map(t => {
-        const mapped = fieldMapper(t, '');
-        return mapped.schemaName ? `${mapped.schemaName}.${mapped.tableName}` : mapped.tableName;
-      }),
+      tables: this.extractTablesWithSchemaFromFields(reportDefinition.selectedFields || [], fieldMapper),
       filters: (reportDefinition.filters || []).map((filter: any) => {
         const correctNames = fieldMapper(filter.field.tableName, filter.field.fieldName);
         return {
@@ -281,6 +278,43 @@ export class ReportsService {
       }
     });
     return Array.from(tables);
+  }
+
+  /**
+   * Extract unique tables with their schemas from fields
+   * Prioritizes schema from field.schema if available, otherwise uses fieldMapper
+   */
+  private extractTablesWithSchemaFromFields(
+    fields: any[], 
+    fieldMapper: (tableName: string, fieldName: string) => { schemaName?: string; tableName: string; fieldName: string }
+  ): string[] {
+    const tableSchemaMap = new Map<string, string>();
+    
+    fields.forEach(field => {
+      if (!field.tableName) return;
+      
+      const tableName = field.tableName;
+      
+      // If this field has a schema, use it
+      if (field.schema) {
+        console.log(`📍 Table ${tableName} using schema from field: ${field.schema}`);
+        tableSchemaMap.set(tableName, field.schema);
+      } 
+      // If we haven't seen this table yet, use fieldMapper as fallback
+      else if (!tableSchemaMap.has(tableName)) {
+        const mapped = fieldMapper(tableName, '');
+        const schemaName = mapped.schemaName || 'dbo';
+        console.log(`📍 Table ${tableName} using schema from fieldMapper: ${schemaName}`);
+        tableSchemaMap.set(tableName, schemaName);
+      }
+    });
+    
+    // Return fully-qualified table names
+    return Array.from(tableSchemaMap.entries()).map(([table, schema]) => {
+      const qualified = `${schema}.${table}`;
+      console.log(`📍 Final table reference: ${qualified}`);
+      return qualified;
+    });
   }
 
   private async buildCountQuery(config: any, databaseType: string = 'mssql'): Promise<string> {
@@ -442,15 +476,24 @@ export class ReportsService {
 
     // Use the actual selectedFields column instead of extracting from query.fields
     const selectedFields = Array.isArray(report.queryConfig.fields)
-      ? report.queryConfig.fields.map((f: any) => ({
-          id: f.id || `${f.tableName}.${f.fieldName}`,
-          tableName: f.tableName,
-          fieldName: f.fieldName,
-          displayName: f.alias || f.displayName || f.fieldName,
-          dataType: f.dataType,
-          aggregation: f.aggregation,
-          formatting: f.formatting
-        }))
+      ? report.queryConfig.fields.map((f: any) => {
+          const schema = f.schemaName || f.schema;
+          if (schema) {
+            console.log(`📤 Mapping field from DB with schema: ${schema}.${f.tableName}.${f.fieldName}`);
+          } else {
+            console.log(`⚠️  Mapping field from DB WITHOUT schema: ${f.tableName}.${f.fieldName}`);
+          }
+          return {
+            id: f.id || `${f.tableName}.${f.fieldName}`,
+            tableName: f.tableName,
+            fieldName: f.fieldName,
+            displayName: f.alias || f.displayName || f.fieldName,
+            dataType: f.dataType,
+            aggregation: f.aggregation,
+            formatting: f.formatting,
+            schema: schema // ✅ Preserve schema property!
+          };
+        })
       : [];
 
     const filters = Array.isArray(query.filters)
@@ -464,7 +507,8 @@ export class ReportsService {
                 displayName: fl.field.alias || fl.field.fieldName,
                 dataType: fl.field.dataType,
                 aggregation: fl.field.aggregation,
-                formatting: fl.field.formatting
+                formatting: fl.field.formatting,
+                schema: fl.field.schemaName || fl.field.schema // ✅ Preserve schema
               }
             : undefined,
           operator: fl.operator,
@@ -478,7 +522,8 @@ export class ReportsService {
           id: (g.field && (g.field.id || `${g.field.tableName}.${g.field.fieldName}`)) || '',
           tableName: g.field?.tableName,
           fieldName: g.field?.fieldName,
-          displayName: g.field?.alias || g.field?.fieldName
+          displayName: g.field?.alias || g.field?.fieldName,
+          schema: g.field?.schemaName || g.field?.schema // ✅ Preserve schema
         }))
       : [];
 
@@ -488,7 +533,8 @@ export class ReportsService {
           tableName: o.field?.tableName,
           fieldName: o.field?.fieldName,
           displayName: o.field?.alias || o.field?.fieldName,
-          direction: o.direction === 'desc' ? 'desc' : 'asc'
+          direction: o.direction === 'desc' ? 'desc' : 'asc',
+          schema: o.field?.schemaName || o.field?.schema // ✅ Preserve schema
         }))
       : [];
 

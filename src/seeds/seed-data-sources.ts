@@ -35,7 +35,7 @@ async function run() {
     const port = process.env.DB_PORT ? parseInt(process.env.DB_PORT) : 1433;
     const database = process.env.DB_NAME || 'Northwind';
     const username = process.env.DB_USER || 'sa';
-    const password = process.env.DB_PASSWORD || 'Heroguy2025!';
+    const password = process.env.DB_PASSWORD || 'strongPassword!';
 
     const entity = repo.create({
       name,
