@@ -16,15 +16,64 @@ import {
   SortOrder
 } from '../../types/query-configuration.type';
 
+/**
+ * Service for building and executing SQL queries from query configurations.
+ * 
+ * This service provides functionality to:
+ * - Convert QueryConfiguration objects into executable SQL queries
+ * - Support complex queries with joins, filters, aggregations, grouping, and sorting
+ * - Handle database-specific SQL syntax (SQL Server, MySQL, PostgreSQL)
+ * - Execute queries against configured data sources with timeout protection
+ * - Automatically handle GROUP BY clauses when aggregations are present
+ * - Validate query configurations before execution
+ * 
+ * The service intelligently handles:
+ * - Schema-qualified table and field references
+ * - Multiple aggregation types (SUM, COUNT, AVG, MIN, MAX, etc.)
+ * - Complex filter conditions with logical operators
+ * - Parameter substitution for dynamic queries
+ * - Database-specific LIMIT/OFFSET syntax
+ * 
+ * @class QueryBuilderService
+ */
 @Injectable()
 export class QueryBuilderService {
+  /**
+   * Creates an instance of QueryBuilderService.
+   * 
+   * @param {Repository<DataSource>} dataSourceRepository - TypeORM repository for DataSource entities
+   */
   constructor(
     @InjectRepository(DataSource)
     private dataSourceRepository: Repository<DataSource>,
   ) {}
 
   /**
-   * Build SQL query from QueryConfiguration
+   * Builds a SQL query from a QueryConfiguration object.
+   * 
+   * This method converts a structured query configuration into executable SQL,
+   * handling all SQL clauses (SELECT, FROM, JOIN, WHERE, GROUP BY, HAVING, ORDER BY, LIMIT).
+   * It intelligently handles database-specific syntax differences and automatically
+   * generates GROUP BY clauses when aggregations are present.
+   * 
+   * @param {QueryConfiguration} config - The query configuration object containing fields, tables, filters, etc.
+   * @param {Record<string, any>} [parameters={}] - Optional parameters for parameterized queries
+   * @param {string} [databaseType='mssql'] - Database type ('mssql', 'mysql', 'postgres', etc.) for syntax-specific handling
+   * @returns {Promise<string>} The generated SQL query string
+   * @throws {BadRequestException} If the query configuration is invalid
+   * 
+   * @example
+   * const query = await queryBuilderService.buildQuery({
+   *   fields: [
+   *     { tableName: 'Customers', fieldName: 'CustomerID', alias: 'ID', schemaName: 'dbo' },
+   *     { tableName: 'Orders', fieldName: 'OrderDate', alias: 'Date', aggregation: AggregationType.MAX }
+   *   ],
+   *   tables: ['dbo.Customers'],
+   *   filters: [
+   *     { field: { tableName: 'Customers', fieldName: 'Country' }, operator: FilterOperator.EQUALS, value: 'USA' }
+   *   ],
+   *   limit: 100
+   * }, {}, 'mssql');
    */
   async buildQuery(
     config: QueryConfiguration,
@@ -81,7 +130,31 @@ export class QueryBuilderService {
   }
 
   /**
-   * Execute query against specified data source
+   * Executes a SQL query against a specified data source.
+   * 
+   * This method creates a temporary database connection, executes the query with
+   * parameter substitution, and returns the results. The connection is automatically
+   * closed after execution. Queries have a 30-second timeout protection.
+   * 
+   * @param {string} dataSourceId - The UUID of the data source to query
+   * @param {string} query - The SQL query string to execute
+   * @param {Record<string, any>} [parameters={}] - Optional parameters to substitute in the query
+   * @returns {Promise<any[]>} An array of query result rows
+   * @throws {NotFoundException} If the data source is not found
+   * @throws {Error} If query execution fails or times out
+   * 
+   * @remarks
+   * - Creates a new connection for each query execution
+   * - Automatically closes the connection after execution
+   * - Logs query execution time and result count
+   * - Warns about slow queries (>10 seconds)
+   * 
+   * @example
+   * const results = await queryBuilderService.executeQuery(
+   *   '123e4567-e89b-12d3-a456-426614174000',
+   *   'SELECT * FROM Customers WHERE Country = @country',
+   *   { country: 'USA' }
+   * );
    */
   async executeQuery(
     dataSourceId: string,
@@ -122,7 +195,20 @@ export class QueryBuilderService {
   }
 
   /**
-   * Build SELECT clause with field aggregations and aliases
+   * Builds the SELECT clause of a SQL query.
+   * 
+   * Constructs a SELECT statement with field expressions, aggregations, and aliases.
+   * For SQL Server, can include TOP clause for simple limit without offset.
+   * 
+   * @private
+   * @param {FieldConfiguration[]} fields - Array of field configurations to select
+   * @param {number} [topLimit] - Optional limit for SQL Server TOP clause (only used when offset is 0)
+   * @returns {string} The SELECT clause as a SQL string
+   * 
+   * @remarks
+   * - Handles custom expressions, aggregations, and simple field references
+   * - Automatically escapes identifiers and qualifies table references
+   * - Uses TOP for SQL Server when limit is specified without offset
    */
   private buildSelectClause(fields: FieldConfiguration[], topLimit?: number): string {
     const selectFields = fields.map(field => {
@@ -149,7 +235,19 @@ export class QueryBuilderService {
   }
   
   /**
-   * Build a schema-qualified table reference
+   * Builds a schema-qualified table reference for SQL queries.
+   * 
+   * Constructs a properly escaped table reference, optionally including schema name.
+   * 
+   * @private
+   * @param {string} [schemaName] - Optional schema name (e.g., 'dbo')
+   * @param {string} [tableName] - Table name (required)
+   * @returns {string} Schema-qualified table reference (e.g., '[dbo].[Customers]' or '[Customers]')
+   * @throws {BadRequestException} If tableName is missing or 'undefined'
+   * 
+   * @example
+   * buildTableReference('dbo', 'Customers') // Returns '[dbo].[Customers]'
+   * buildTableReference(undefined, 'Orders') // Returns '[Orders]'
    */
   private buildTableReference(schemaName?: string, tableName?: string): string {
     if (!tableName || tableName === 'undefined') {
@@ -162,7 +260,20 @@ export class QueryBuilderService {
   }
 
   /**
-   * Build aggregate expression for field
+   * Builds an aggregate expression for a field (e.g., SUM, COUNT, AVG).
+   * 
+   * Constructs the appropriate SQL aggregate function based on the field's
+   * aggregation type. Handles special cases like COUNT(*) and schema-qualified references.
+   * 
+   * @private
+   * @param {FieldConfiguration} field - Field configuration with aggregation type
+   * @returns {string} The aggregate expression (e.g., 'SUM([dbo].[Orders].[Amount])')
+   * @throws {BadRequestException} If fieldName is missing or 'undefined'
+   * 
+   * @remarks
+   * - Special handling for COUNT(*) - returns 'COUNT(*)' without table qualification
+   * - Supports SUM, COUNT, COUNT_DISTINCT, AVG, MIN, MAX, CONCAT (STRING_AGG)
+   * - Automatically qualifies field references with schema and table names
    */
   private buildAggregateExpression(field: FieldConfiguration): string {
     console.log('🔧 buildAggregateExpression called:', {
@@ -208,7 +319,18 @@ export class QueryBuilderService {
   }
 
   /**
-   * Build FROM clause
+   * Builds the FROM clause of a SQL query.
+   * 
+   * Constructs a FROM clause with proper table reference, supporting both
+   * schema-qualified (schema.table) and unqualified table names.
+   * 
+   * @private
+   * @param {string} tableName - Table name, optionally schema-qualified (e.g., 'dbo.Customers' or 'Customers')
+   * @returns {string} The FROM clause as a SQL string
+   * 
+   * @example
+   * buildFromClause('dbo.Customers') // Returns 'FROM [dbo].[Customers]\n'
+   * buildFromClause('Orders') // Returns 'FROM [Orders]\n'
    */
   private buildFromClause(tableName: string): string {
     // Support schema.table format
@@ -220,7 +342,27 @@ export class QueryBuilderService {
   }
 
   /**
-   * Build JOIN clauses
+   * Builds JOIN clauses for a SQL query.
+   * 
+   * Constructs one or more JOIN statements (INNER, LEFT, RIGHT, FULL) with
+   * proper join conditions. Supports multiple join conditions per join.
+   * 
+   * @private
+   * @param {JoinConfiguration[]} joins - Array of join configurations
+   * @returns {string} The JOIN clauses as SQL strings
+   * 
+   * @remarks
+   * - Supports all standard join types (INNER, LEFT, RIGHT, FULL)
+   * - Each join can have multiple conditions combined with AND
+   * - Automatically qualifies table references with schemas
+   * 
+   * @example
+   * buildJoinClauses([{
+   *   type: 'INNER',
+   *   leftTable: 'Customers', leftSchema: 'dbo',
+   *   rightTable: 'Orders', rightSchema: 'dbo',
+   *   conditions: [{ leftField: 'CustomerID', operator: '=', rightField: 'CustomerID' }]
+   * }])
    */
   private buildJoinClauses(joins: JoinConfiguration[]): string {
     return joins.map(join => {
@@ -237,7 +379,20 @@ export class QueryBuilderService {
   }
 
   /**
-   * Build WHERE clause with complex filter logic
+   * Builds the WHERE clause of a SQL query.
+   * 
+   * Constructs a WHERE clause from an array of filter configurations,
+   * handling complex logical operators and parameter substitution.
+   * 
+   * @private
+   * @param {FilterConfiguration[]} filters - Array of filter configurations
+   * @param {Record<string, any>} parameters - Parameters for parameterized filters
+   * @returns {string} The WHERE clause as a SQL string, or empty string if no filters
+   * 
+   * @remarks
+   * - Returns empty string if filters array is empty
+   * - Handles logical operators (AND, OR) between conditions
+   * - Supports parameterized values via isParameter flag
    */
   private buildWhereClause(
     filters: FilterConfiguration[],
@@ -274,7 +429,22 @@ export class QueryBuilderService {
   }
 
   /**
-   * Build single filter condition
+   * Builds a single filter condition from a FilterConfiguration.
+   * 
+   * Constructs a SQL condition based on the filter operator, handling various
+   * comparison operators, pattern matching, null checks, and parameter substitution.
+   * 
+   * @private
+   * @param {FilterConfiguration} filter - Filter configuration object
+   * @param {Record<string, any>} parameters - Parameters for parameterized filters
+   * @returns {string} The filter condition as a SQL string
+   * @throws {BadRequestException} If the filter operator is unsupported
+   * 
+   * @remarks
+   * - Supports: EQUALS, NOT_EQUALS, GREATER_THAN, LESS_THAN, BETWEEN, IN, LIKE, STARTS_WITH, ENDS_WITH, IS_NULL, IS_NOT_NULL
+   * - Automatically formats values based on field data type
+   * - Handles parameter substitution when isParameter is true
+   * - 'contains' is supported as an alias for LIKE with wildcards
    */
   private buildSingleFilterCondition(
     filter: FilterConfiguration,
@@ -329,7 +499,13 @@ export class QueryBuilderService {
   }
 
   /**
-   * Build GROUP BY clause
+   * Builds a GROUP BY clause from an array of group-by field configurations.
+   * 
+   * @private
+   * @param {any[]} groupBy - Array of group-by field configurations
+   * @returns {string} The GROUP BY clause as a SQL string
+   * 
+   * @deprecated This method is kept for backward compatibility but is superseded by buildIntelligentGroupByClause
    */
   private buildGroupByClause(groupBy: any[]): string {
     const groupFields = groupBy.map(group => {
@@ -341,8 +517,23 @@ export class QueryBuilderService {
   }
 
   /**
-   * Intelligently build GROUP BY clause based on field aggregations
-   * When aggregations are present, non-aggregated fields must be in GROUP BY
+   * Intelligently builds a GROUP BY clause based on field aggregations.
+   * 
+   * When aggregations are present in the SELECT clause, SQL requires that all
+   * non-aggregated fields be included in the GROUP BY clause. This method
+   * automatically identifies and groups non-aggregated fields, ensuring SQL
+   * compliance while minimizing manual configuration.
+   * 
+   * @private
+   * @param {FieldConfiguration[]} fields - Array of field configurations from SELECT clause
+   * @param {any[]} [explicitGroupBy] - Optional explicit group-by field configurations
+   * @returns {string} The GROUP BY clause as a SQL string, or empty string if not needed
+   * 
+   * @remarks
+   * - Returns empty string if no aggregations are present
+   * - Automatically includes all non-aggregated, non-expression fields
+   * - Merges explicit group-by fields with auto-detected ones
+   * - Prevents duplicate fields in GROUP BY clause
    */
   private buildIntelligentGroupByClause(
     fields: FieldConfiguration[],
@@ -395,7 +586,15 @@ export class QueryBuilderService {
   }
 
   /**
-   * Build HAVING clause (similar to WHERE but for grouped results)
+   * Builds the HAVING clause of a SQL query.
+   * 
+   * The HAVING clause is similar to WHERE but applies to grouped/aggregated results
+   * rather than individual rows. Used for filtering after GROUP BY operations.
+   * 
+   * @private
+   * @param {FilterConfiguration[]} having - Array of filter configurations for HAVING clause
+   * @param {Record<string, any>} parameters - Parameters for parameterized filters
+   * @returns {string} The HAVING clause as a SQL string
    */
   private buildHavingClause(
     having: FilterConfiguration[],
@@ -406,7 +605,20 @@ export class QueryBuilderService {
   }
 
   /**
-   * Build ORDER BY clause
+   * Builds the ORDER BY clause of a SQL query.
+   * 
+   * Constructs an ORDER BY clause with proper field references, supporting
+   * both regular fields and aggregated expressions. Fields are sorted by
+   * priority before being added to the clause.
+   * 
+   * @private
+   * @param {any[]} orderBy - Array of sort configurations with priority, direction, and field
+   * @returns {string} The ORDER BY clause as a SQL string
+   * 
+   * @remarks
+   * - Sorts fields by priority before building the clause
+   * - Supports both regular fields and aggregated expressions
+   * - Direction can be 'ASC' or 'DESC' (case-insensitive)
    */
   private buildOrderByClause(orderBy: any[]): string {
     const sortFields = orderBy
@@ -423,7 +635,18 @@ export class QueryBuilderService {
   }
 
   /**
-   * Build default ORDER BY clause (required for SQL Server OFFSET/FETCH)
+   * Builds a default ORDER BY clause when none is specified.
+   * 
+   * SQL Server requires an ORDER BY clause when using OFFSET/FETCH for pagination.
+   * This method creates a default ordering by the first field in the SELECT clause.
+   * 
+   * @private
+   * @param {FieldConfiguration[]} fields - Array of field configurations from SELECT clause
+   * @returns {string} A default ORDER BY clause (e.g., 'ORDER BY [dbo].[Customers].[CustomerID] ASC\n')
+   * 
+   * @remarks
+   * - Falls back to 'ORDER BY (SELECT NULL)' if no fields are available
+   * - Orders by the first field in ascending order by default
    */
   private buildDefaultOrderByClause(fields: FieldConfiguration[]): string {
     if (fields.length === 0) {
@@ -439,7 +662,21 @@ export class QueryBuilderService {
   }
 
   /**
-   * Build LIMIT clause with database-specific syntax
+   * Builds a LIMIT/OFFSET clause with database-specific syntax.
+   * 
+   * Different databases use different syntax for limiting and paginating results.
+   * This method generates the appropriate syntax based on the database type.
+   * 
+   * @private
+   * @param {number} limit - Maximum number of rows to return
+   * @param {number} [offset=0] - Number of rows to skip (for pagination)
+   * @param {string} [databaseType='mssql'] - Database type for syntax selection
+   * @returns {string} The LIMIT/OFFSET clause as a SQL string, or empty string for SQL Server TOP
+   * 
+   * @remarks
+   * - SQL Server: Uses TOP in SELECT for simple limit, OFFSET/FETCH for pagination
+   * - MySQL/PostgreSQL: Uses LIMIT/OFFSET syntax
+   * - Returns empty string for SQL Server when offset is 0 (TOP is used in SELECT instead)
    */
   private buildLimitClause(limit: number, offset: number = 0, databaseType: string = 'mssql'): string {
     // SQL Server: Use TOP if no offset, otherwise use OFFSET/FETCH (which requires ORDER BY)
@@ -462,7 +699,11 @@ export class QueryBuilderService {
   }
 
   /**
-   * Check if groupBy array has valid fields
+   * Validates that a groupBy array contains valid field configurations.
+   * 
+   * @private
+   * @param {any[]} groupBy - Array of group-by field configurations
+   * @returns {boolean} True if at least one valid group-by field exists
    */
   private hasValidGroupByFields(groupBy: any[]): boolean {
     return groupBy.some(group => 
@@ -473,7 +714,11 @@ export class QueryBuilderService {
   }
 
   /**
-   * Check if orderBy array has valid fields
+   * Validates that an orderBy array contains valid field configurations.
+   * 
+   * @private
+   * @param {any[]} orderBy - Array of sort field configurations
+   * @returns {boolean} True if at least one valid order-by field exists
    */
   private hasValidOrderByFields(orderBy: any[]): boolean {
     return orderBy.some(order => 
@@ -484,7 +729,23 @@ export class QueryBuilderService {
   }
 
   /**
-   * Format value based on data type for SQL
+   * Formats a value for use in SQL queries based on its data type.
+   * 
+   * Properly formats values with appropriate quoting, escaping, and type conversion
+   * to ensure SQL injection prevention and correct SQL syntax.
+   * 
+   * @private
+   * @param {any} value - The value to format
+   * @param {FieldDataType} dataType - The expected data type of the value
+   * @returns {string} The formatted value as a SQL string literal or unquoted value
+   * 
+   * @remarks
+   * - Strings, dates, UUIDs, JSON, and binary data are quoted and escaped
+   * - Numbers are left unquoted
+   * - Booleans are converted to 1/0 for SQL Server compatibility
+   * - NULL/undefined values return 'NULL'
+   * - Automatically detects string values that look like numbers and quotes them appropriately
+   * - Escapes single quotes in string values by doubling them
    */
   private formatValue(value: any, dataType: FieldDataType): string {
     if (value === null || value === undefined) {
@@ -542,7 +803,24 @@ export class QueryBuilderService {
   }
 
   /**
-   * Escape SQL identifiers (table names, column names)
+   * Escapes SQL identifiers (table names, column names) for safe use in queries.
+   * 
+   * Wraps identifiers in square brackets (SQL Server style) to handle special
+   * characters, reserved words, and spaces in names.
+   * 
+   * @private
+   * @param {string} identifier - The identifier to escape (table or column name)
+   * @returns {string} The escaped identifier (e.g., '[Customer Name]')
+   * @throws {BadRequestException} If identifier is null, undefined, or the string 'undefined'/'null'
+   * 
+   * @remarks
+   * - Uses square brackets for SQL Server compatibility
+   * - Prevents SQL injection through identifier names
+   * - Validates that identifier is not null/undefined
+   * 
+   * @example
+   * escapeIdentifier('Customer Name') // Returns '[Customer Name]'
+   * escapeIdentifier('dbo.Customers') // Returns '[dbo.Customers]'
    */
   private escapeIdentifier(identifier: string): string {
     if (!identifier || identifier === 'undefined' || identifier === 'null') {
@@ -553,7 +831,24 @@ export class QueryBuilderService {
   }
 
   /**
-   * Replace parameter placeholders in query
+   * Replaces parameter placeholders in a SQL query with actual values.
+   * 
+   * Replaces @parameterName placeholders with formatted values from the parameters object.
+   * This is a simple string replacement approach (not parameterized queries).
+   * 
+   * @private
+   * @param {string} query - SQL query string with @parameterName placeholders
+   * @param {Record<string, any>} parameters - Object mapping parameter names to values
+   * @returns {string} Query string with parameters replaced
+   * 
+   * @remarks
+   * - Uses simple string replacement (not true parameterized queries)
+   * - String values are automatically quoted
+   * - All occurrences of each parameter are replaced
+   * 
+   * @example
+   * replaceParameters('SELECT * FROM Customers WHERE Country = @country', { country: 'USA' })
+   * // Returns: "SELECT * FROM Customers WHERE Country = 'USA'"
    */
   private replaceParameters(query: string, parameters: Record<string, any>): string {
     let result = query;
@@ -568,7 +863,22 @@ export class QueryBuilderService {
   }
 
   /**
-   * Validate query configuration before building
+   * Validates a query configuration before building the SQL query.
+   * 
+   * Performs comprehensive validation including:
+   * - Ensures at least one field and one table are specified
+   * - Validates field properties (fieldName, tableName, alias)
+   * - Checks that all referenced tables exist in the tables array
+   * - Validates aggregation consistency
+   * 
+   * @private
+   * @param {QueryConfiguration} config - The query configuration to validate
+   * @throws {BadRequestException} If validation fails with specific error messages
+   * 
+   * @remarks
+   * - Throws descriptive error messages indicating which field/table is invalid
+   * - Handles both schema-qualified and unqualified table names
+   * - Validates aggregation consistency (warns but doesn't fail)
    */
   private validateQueryConfiguration(config: QueryConfiguration): void {
     if (!config.fields || config.fields.length === 0) {
@@ -630,8 +940,19 @@ export class QueryBuilderService {
   }
 
   /**
-   * Validate that aggregation usage is consistent
-   * This provides helpful error messages but the query will still work due to automatic GROUP BY
+   * Validates that aggregation usage is consistent across fields.
+   * 
+   * Checks if the query mixes aggregated and non-aggregated fields, which requires
+   * GROUP BY clauses. This validation provides helpful warnings but doesn't fail
+   * because the service automatically handles GROUP BY generation.
+   * 
+   * @private
+   * @param {FieldConfiguration[]} fields - Array of field configurations to validate
+   * 
+   * @remarks
+   * - Logs a warning if mixed aggregations are detected
+   * - Does not throw errors (automatic GROUP BY handles this)
+   * - Useful for debugging query construction
    */
   private validateAggregationConsistency(fields: FieldConfiguration[]): void {
     const hasAggregations = fields.some(field => field.aggregation);
@@ -645,7 +966,22 @@ export class QueryBuilderService {
   }
 
   /**
-   * Create database connection based on data source configuration
+   * Creates a temporary database connection based on a data source configuration.
+   * 
+   * Creates a new TypeORM DataSource connection with unique name to avoid conflicts.
+   * Configures database-specific options (e.g., SQL Server certificate trust).
+   * 
+   * @private
+   * @param {DataSource} dataSource - The data source entity with connection details
+   * @returns {Promise<TypeOrmDataSource>} A configured TypeORM DataSource instance
+   * @throws {BadRequestException} If database type is unsupported
+   * 
+   * @remarks
+   * - Generates unique connection name to avoid conflicts
+   * - Uses default ports if not specified in data source
+   * - Configures SQL Server-specific options (trustServerCertificate, encrypt, enableArithAbort)
+   * - Supports Windows domain authentication via DB_DOMAIN environment variable
+   * - Connection should be destroyed after use
    */
   private async createConnection(dataSource: DataSource): Promise<TypeOrmDataSource> {
     // Map database type names to TypeORM driver names
@@ -681,7 +1017,25 @@ export class QueryBuilderService {
   }
 
   /**
-   * Map database type names to TypeORM driver names
+   * Maps database type names to TypeORM driver names.
+   * 
+   * Converts user-friendly database type names to the driver names expected by TypeORM.
+   * Supports multiple aliases for the same database type.
+   * 
+   * @private
+   * @param {string} type - Database type name (e.g., 'sqlserver', 'postgresql', 'mysql')
+   * @returns {string} The corresponding TypeORM driver name
+   * @throws {BadRequestException} If the database type is not supported
+   * 
+   * @remarks
+   * - Case-insensitive matching
+   * - Supports multiple aliases (e.g., 'sqlserver' and 'mssql' both map to 'mssql')
+   * - Throws error for unsupported types
+   * 
+   * @example
+   * mapDatabaseTypeToDriver('sqlserver') // Returns 'mssql'
+   * mapDatabaseTypeToDriver('postgresql') // Returns 'postgres'
+   * mapDatabaseTypeToDriver('PostgreSQL') // Returns 'postgres' (case-insensitive)
    */
   private mapDatabaseTypeToDriver(type: string): string {
     const typeMap: Record<string, string> = {
@@ -705,7 +1059,19 @@ export class QueryBuilderService {
   }
 
   /**
-   * Create timeout promise for query execution
+   * Creates a promise that rejects after a specified timeout duration.
+   * 
+   * Used with Promise.race() to implement query execution timeouts.
+   * 
+   * @private
+   * @param {number} timeout - Timeout duration in milliseconds
+   * @returns {Promise<never>} A promise that rejects with a timeout error
+   * 
+   * @example
+   * const result = await Promise.race([
+   *   executeQuery(),
+   *   createTimeoutPromise(30000) // 30 second timeout
+   * ]);
    */
   private createTimeoutPromise(timeout: number): Promise<never> {
     return new Promise((_, reject) => {
@@ -716,7 +1082,21 @@ export class QueryBuilderService {
   }
 
   /**
-   * Log query execution for monitoring and optimization
+   * Logs query execution metrics for monitoring and optimization.
+   * 
+   * Records execution time, result count, and data source ID. Warns about
+   * slow queries that exceed the threshold (10 seconds).
+   * 
+   * @private
+   * @param {string} dataSourceId - The UUID of the data source used
+   * @param {string} query - The executed SQL query
+   * @param {number} executionTime - Query execution time in milliseconds
+   * @param {number} resultCount - Number of rows returned
+   * 
+   * @remarks
+   * - Logs all query executions for monitoring
+   * - Warns about queries taking longer than 10 seconds
+   * - Can be extended to send metrics to monitoring services
    */
   private logQueryExecution(
     dataSourceId: string,
@@ -733,7 +1113,19 @@ export class QueryBuilderService {
   }
 
   /**
-   * Get default port for database type
+   * Gets the default port number for a database driver type.
+   * 
+   * Returns the standard port number used by each database type when no port
+   * is explicitly specified in the data source configuration.
+   * 
+   * @private
+   * @param {string} driverType - TypeORM driver name (e.g., 'mssql', 'postgres', 'mysql')
+   * @returns {number} Default port number for the database type, or 1433 (SQL Server) as fallback
+   * 
+   * @example
+   * getDefaultPort('mssql') // Returns 1433
+   * getDefaultPort('postgres') // Returns 5432
+   * getDefaultPort('mysql') // Returns 3306
    */
   private getDefaultPort(driverType: string): number {
     const defaultPorts: Record<string, number> = {

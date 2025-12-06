@@ -1,5 +1,5 @@
 import { Controller, Param, Get, Post, Put, Body, Delete, Res, HttpStatus } from "@nestjs/common";
-import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiBody, ApiProperty, ApiConsumes, ApiProduces } from "@nestjs/swagger";
+import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiBody, ApiConsumes, ApiProduces } from "@nestjs/swagger";
 import { Response } from 'express';
 import { ReportsService } from "./reports.service";
 import { Report } from "../../entities/report.entity";

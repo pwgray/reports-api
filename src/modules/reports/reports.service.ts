@@ -12,9 +12,35 @@ import * as XLSX from 'xlsx';
 import { ReportParameter } from "src/entities/report-parameter.entity";
 import { ReportSchedule } from "src/entities/report-schedule.entity";
 
-// modules/reports/reports.service.ts
+/**
+ * Service for managing reports and report execution.
+ * 
+ * This service provides comprehensive functionality for:
+ * - CRUD operations on reports (create, read, update, delete)
+ * - Executing saved reports with parameters
+ * - Previewing reports without saving
+ * - Exporting reports to Excel format
+ * - Managing report lifecycle (archive, publish, unpublish)
+ * - Retrieving report parameters and schedules
+ * - Mapping database schemas to field names
+ * - Converting report definitions to query configurations
+ * 
+ * The service integrates with QueryBuilderService for SQL generation,
+ * ReportGeneratorService for format conversion, and handles complex
+ * field mapping between normalized names and actual database schema names.
+ * 
+ * @class ReportsService
+ */
 @Injectable()
 export class ReportsService {
+  /**
+   * Creates an instance of ReportsService.
+   * 
+   * @param {Repository<Report>} reportRepository - TypeORM repository for Report entities
+   * @param {UserService} userService - Service for user management
+   * @param {QueryBuilderService} queryBuilderService - Service for building SQL queries
+   * @param {ReportGeneratorService} reportGeneratorService - Service for generating reports in various formats
+   */
   constructor(
     @InjectRepository(Report)
     private readonly reportRepository: Repository<Report>,
@@ -33,6 +59,27 @@ export class ReportsService {
 //     return this.reportRepository.save(report);
 //   }
 
+  /**
+   * Executes a saved report and generates output in the specified format.
+   * 
+   * Loads a report by ID, builds and executes its query with provided parameters,
+   * then generates the report output in the requested format (HTML, PDF, or Excel).
+   * 
+   * @param {string} reportId - The UUID of the report to execute
+   * @param {Record<string, any>} parameters - Parameters to substitute in the report query
+   * @param {'html' | 'pdf' | 'excel'} [format='html'] - Output format for the generated report
+   * @returns {Promise<ReportResult>} Generated report result with content, MIME type, and filename
+   * @throws {Error} If the report is not found
+   * @throws {Error} If query execution fails
+   * @throws {Error} If report generation fails
+   * 
+   * @example
+   * const result = await reportsService.executeReport(
+   *   '123e4567-e89b-12d3-a456-426614174000',
+   *   { startDate: '2024-01-01', endDate: '2024-12-31' },
+   *   'pdf'
+   * );
+   */
   async executeReport(
     reportId: string, 
     parameters: Record<string, any>,
@@ -62,6 +109,19 @@ export class ReportsService {
     );
   }
 
+  /**
+   * Retrieves all reports from the database.
+   * 
+   * Fetches all reports with their related entities (dataSource, parameters,
+   * schedules, createdBy) and maps them to client-friendly format.
+   * 
+   * @returns {Promise<Report[]>} Array of all reports in client-friendly format
+   * 
+   * @remarks
+   * - Includes related entities: dataSource, parameters, schedules, createdBy
+   * - Maps reports to client format using mapToClientReport
+   * - Returns empty array if no reports exist
+   */
   async getReports(): Promise<Report[]> {
     const reports = await this.reportRepository.find({
       relations: ['dataSource', 'parameters', 'schedules', 'createdBy']
@@ -69,6 +129,20 @@ export class ReportsService {
     return reports.map(r => this.mapToClientReport(r) as unknown as Report);
   }
 
+  /**
+   * Retrieves a single report by its unique identifier.
+   * 
+   * Fetches a report with all related entities and maps it to client-friendly format.
+   * Returns null if the report is not found.
+   * 
+   * @param {string} id - The UUID of the report to retrieve
+   * @returns {Promise<Report|null>} The report in client-friendly format, or null if not found
+   * 
+   * @remarks
+   * - Includes related entities: dataSource, parameters, schedules, createdBy
+   * - Maps report to client format using mapToClientReport
+   * - Returns null instead of throwing error if report not found
+   */
   async getReport(id: string): Promise<Report|null> {
     const report = await this.reportRepository.findOne({
       where: { id },
@@ -78,6 +152,28 @@ export class ReportsService {
     return this.mapToClientReport(report) as unknown as Report;
   }
 
+  /**
+   * Creates a new report in the database.
+   * 
+   * Saves a new report entity, handling layoutConfig serialization if it's
+   * provided as a string. Automatically parses JSON strings to objects.
+   * 
+   * @param {Report} report - The report entity to create
+   * @returns {Promise<Report>} The created report entity with generated ID and timestamps
+   * 
+   * @remarks
+   * - Automatically handles layoutConfig as string or object
+   * - Parses JSON strings to objects for TypeORM serialization
+   * - Logs errors if JSON parsing fails but continues with original value
+   * 
+   * @example
+   * const newReport = await reportsService.createReport({
+   *   name: 'Sales Report',
+   *   queryConfig: { fields: [...], tables: [...] },
+   *   layoutConfig: { columns: [...] },
+   *   dataSource: { id: 'ds-123' }
+   * });
+   */
   async createReport(report: Report): Promise<Report> {
     // Ensure layoutConfig is properly set
     if (report.layoutConfig) {
@@ -95,6 +191,22 @@ export class ReportsService {
     return this.reportRepository.save(report);
   }
 
+  /**
+   * Updates an existing report in the database.
+   * 
+   * Updates a report entity by ID, handling layoutConfig serialization if it's
+   * provided as a string. Automatically parses JSON strings to objects.
+   * 
+   * @param {string} id - The UUID of the report to update
+   * @param {Report} report - The report entity with updated properties
+   * @returns {Promise<Report>} The updated report entity
+   * 
+   * @remarks
+   * - Automatically handles layoutConfig as string or object
+   * - Parses JSON strings to objects for TypeORM serialization
+   * - Logs errors if JSON parsing fails but continues with original value
+   * - Note: This method saves the entire report entity, not just changed fields
+   */
   async updateReport(id: string, report: Report): Promise<Report> {
     // Ensure layoutConfig is properly set
     if (report.layoutConfig) {
@@ -112,10 +224,61 @@ export class ReportsService {
     return this.reportRepository.save(report);
   }
 
+  /**
+   * Deletes a report from the database.
+   * 
+   * Permanently removes a report by its unique identifier. This operation
+   * cannot be undone.
+   * 
+   * @param {string} id - The UUID of the report to delete
+   * @returns {Promise<void>}
+   * 
+   * @remarks
+   * - Does not throw error if report doesn't exist (TypeORM behavior)
+   * - Consider implementing soft delete with isArchived flag instead
+   */
   async deleteReport(id: string): Promise<void> {
     await this.reportRepository.delete(id);
   }
 
+  /**
+   * Previews a report without saving it to the database.
+   * 
+   * This method executes a report query based on a report definition object,
+   * which can be a draft report configuration. It handles field mapping from
+   * normalized names to actual database schema names, builds and executes the
+   * query, and returns preview data with execution metrics.
+   * 
+   * @param {any} reportDefinition - Report definition object with dataSource, selectedFields, filters, etc.
+   * @returns {Promise<any>} Preview result containing data, totalRows, executionTime, and generated query
+   * @throws {Error} If report definition is invalid or missing required fields
+   * @throws {Error} If data source is invalid or missing
+   * @throws {Error} If no fields are selected
+   * @throws {Error} If query execution fails
+   * 
+   * @remarks
+   * - Validates report definition structure before processing
+   * - Maps field names using database schema information
+   * - Supports schema-qualified table and field names
+   * - Limits results to 100 rows by default (configurable via limit property)
+   * - Executes count query separately for total row count
+   * - Includes extensive logging for debugging
+   * - Returns generated SQL query for debugging purposes
+   * 
+   * @example
+   * const preview = await reportsService.previewReport({
+   *   name: 'Sales Report',
+   *   dataSource: { id: 'ds-123', schema: {...} },
+   *   selectedFields: [
+   *     { tableName: 'Customers', fieldName: 'CustomerID', displayName: 'Customer ID' },
+   *     { tableName: 'Orders', fieldName: 'OrderDate', displayName: 'Order Date' }
+   *   ],
+   *   filters: [
+   *     { field: { tableName: 'Orders', fieldName: 'OrderDate' }, operator: '>=', value: '2024-01-01' }
+   *   ],
+   *   limit: 50
+   * });
+   */
   async previewReport(reportDefinition: any): Promise<any> {
     console.log('🚀 ==== PREVIEW REPORT START ====');
     console.log('📝 Report Definition Keys:', Object.keys(reportDefinition || {}));
@@ -290,6 +453,15 @@ export class ReportsService {
     }
   }
 
+  /**
+   * Extracts unique table names from an array of field configurations.
+   * 
+   * @private
+   * @param {any[]} fields - Array of field configuration objects
+   * @returns {string[]} Array of unique table names
+   * 
+   * @deprecated This method is kept for backward compatibility but is superseded by extractTablesWithSchemaFromFields
+   */
   private extractTablesFromFields(fields: any[]): string[] {
     const tables = new Set<string>();
     fields.forEach(field => {
@@ -301,8 +473,22 @@ export class ReportsService {
   }
 
   /**
-   * Extract unique tables with their schemas from fields
-   * Prioritizes schema from field.schema if available, otherwise uses fieldMapper
+   * Extracts unique tables with their schemas from field configurations.
+   * 
+   * Builds schema-qualified table names (e.g., 'dbo.Customers') by prioritizing
+   * schema information from field.schema property, falling back to fieldMapper
+   * if schema is not available in the field.
+   * 
+   * @private
+   * @param {any[]} fields - Array of field configuration objects
+   * @param {(tableName: string, fieldName: string) => { schemaName?: string; tableName: string; fieldName: string }} fieldMapper - Function to map table/field names to schema-qualified names
+   * @returns {string[]} Array of schema-qualified table names (e.g., ['dbo.Customers', 'dbo.Orders'])
+   * 
+   * @remarks
+   * - Prioritizes field.schema if available
+   * - Uses fieldMapper as fallback for tables without explicit schema
+   * - Defaults to 'dbo' schema if mapper doesn't provide schema
+   * - Returns fully-qualified names in format 'schema.table'
    */
   private extractTablesWithSchemaFromFields(
     fields: any[], 
@@ -337,6 +523,23 @@ export class ReportsService {
     });
   }
 
+  /**
+   * Builds a COUNT(*) query based on a query configuration.
+   * 
+   * Creates a query that counts total rows matching the same filters and joins
+   * as the main query, but without limit/offset for accurate pagination totals.
+   * 
+   * @private
+   * @param {any} config - Query configuration object
+   * @param {string} [databaseType='mssql'] - Database type for syntax-specific handling
+   * @returns {Promise<string>} SQL COUNT query string
+   * 
+   * @remarks
+   * - Uses same filters and joins as main query
+   * - Removes orderBy, limit, and offset clauses
+   * - Returns COUNT(*) as 'total' alias
+   * - Used for pagination total count calculation
+   */
   private async buildCountQuery(config: any, databaseType: string = 'mssql'): Promise<string> {
     // Build a COUNT(*) query with the same filters and joins
     const countConfig = {
@@ -355,6 +558,21 @@ export class ReportsService {
     return this.queryBuilderService.buildQuery(countConfig, {}, databaseType);
   }
 
+  /**
+   * Maps database type names to query builder compatible types.
+   * 
+   * Converts user-friendly database type names to the format expected
+   * by the query builder service.
+   * 
+   * @private
+   * @param {string} type - Database type name (e.g., 'sqlserver', 'postgresql')
+   * @returns {string} Mapped database type (defaults to 'mssql' if unknown)
+   * 
+   * @remarks
+   * - Case-insensitive matching
+   * - Supports multiple aliases for same database type
+   * - Defaults to 'mssql' for unknown types
+   */
   private mapDatabaseType(type: string): string {
     const typeMap: Record<string, string> = {
       'sqlserver': 'mssql',
@@ -368,7 +586,28 @@ export class ReportsService {
   }
 
   /**
-   * Create a field mapper function that maps normalized names to actual database names
+   * Creates a field mapper function that maps normalized names to actual database names.
+   * 
+   * Builds a lookup function that converts normalized table/field names (as used in the UI)
+   * to actual database schema-qualified names based on the database schema information.
+   * This handles case-insensitive matching and schema qualification.
+   * 
+   * @private
+   * @param {any} schema - Database schema object with tables and columns
+   * @returns {(tableName: string, fieldName: string) => { schemaName?: string; tableName: string; fieldName: string }} Field mapper function
+   * 
+   * @remarks
+   * - Returns identity function if schema is not available
+   * - Performs case-insensitive table and column name matching
+   * - Returns schema-qualified names (schema.table.column)
+   * - Defaults to 'dbo' schema if not specified in schema
+   * - Logs warnings for unmapped tables/columns
+   * - Includes extensive logging for debugging field mapping
+   * 
+   * @example
+   * const mapper = createFieldMapper(schema);
+   * const mapped = mapper('customers', 'customerid');
+   * // Returns: { schemaName: 'dbo', tableName: 'Customers', fieldName: 'CustomerID' }
    */
   private createFieldMapper(schema: any): (tableName: string, fieldName: string) => { schemaName?: string; tableName: string; fieldName: string } {
     if (!schema || !schema.tables) {
@@ -437,6 +676,19 @@ export class ReportsService {
     };
   }
 
+  /**
+   * Archives a report by setting its isArchived flag to true.
+   * 
+   * Archived reports are typically hidden from normal views but retained
+   * for historical purposes. This is a soft delete operation.
+   * 
+   * @param {string} id - The UUID of the report to archive
+   * @returns {Promise<void>}
+   * @throws {Error} If the report is not found
+   * 
+   * @example
+   * await reportsService.archiveReport('123e4567-e89b-12d3-a456-426614174000');
+   */
   async archiveReport(id: string): Promise<void> {
     const report = await this.reportRepository.findOneBy({id:id});
     if(!report) {
@@ -446,6 +698,19 @@ export class ReportsService {
     await this.reportRepository.save(report);
   }
 
+  /**
+   * Unarchives a report by setting its isArchived flag to false.
+   * 
+   * Restores an archived report to active status, making it visible
+   * in normal report listings again.
+   * 
+   * @param {string} id - The UUID of the report to unarchive
+   * @returns {Promise<void>}
+   * @throws {Error} If the report is not found
+   * 
+   * @example
+   * await reportsService.unarchiveReport('123e4567-e89b-12d3-a456-426614174000');
+   */
   async unarchiveReport(id: string): Promise<void> {
     const report = await this.reportRepository.findOneBy({id:id});
     if(!report) {
@@ -455,6 +720,19 @@ export class ReportsService {
     await this.reportRepository.save(report);
   }
 
+  /**
+   * Publishes a report by setting its isPublic flag to true.
+   * 
+   * Published reports are made available to all users (depending on
+   * authorization rules). This makes the report visible in public listings.
+   * 
+   * @param {string} id - The UUID of the report to publish
+   * @returns {Promise<void>}
+   * @throws {Error} If the report is not found
+   * 
+   * @example
+   * await reportsService.publishReport('123e4567-e89b-12d3-a456-426614174000');
+   */
   async publishReport(id: string): Promise<void> {
     const report = await this.reportRepository.findOneBy({id:id});
     if(!report) {
@@ -464,6 +742,19 @@ export class ReportsService {
     await this.reportRepository.save(report);
   }
 
+  /**
+   * Unpublishes a report by setting its isPublic flag to false.
+   * 
+   * Makes a published report private again, removing it from public
+   * listings and restricting access to authorized users only.
+   * 
+   * @param {string} id - The UUID of the report to unpublish
+   * @returns {Promise<void>}
+   * @throws {Error} If the report is not found
+   * 
+   * @example
+   * await reportsService.unpublishReport('123e4567-e89b-12d3-a456-426614174000');
+   */
   async unpublishReport(id: string): Promise<void> {
     const report = await this.reportRepository.findOneBy({id:id});
     if(!report) {
@@ -473,6 +764,20 @@ export class ReportsService {
     await this.reportRepository.save(report);
   }
 
+  /**
+   * Retrieves all parameters associated with a report.
+   * 
+   * Fetches the report and returns its parameters, which define the
+   * input values that can be provided when executing the report.
+   * 
+   * @param {string} id - The UUID of the report
+   * @returns {Promise<ReportParameter[]>} Array of report parameters
+   * @throws {Error} If the report is not found
+   * 
+   * @example
+   * const parameters = await reportsService.getReportParameters('123e4567-e89b-12d3-a456-426614174000');
+   * // Returns: [{ name: 'startDate', type: 'date', required: true }, ...]
+   */
   async getReportParameters(id: string): Promise<ReportParameter[]> {
     const report = await this.reportRepository.findOneBy({id:id});
     if(!report) {
@@ -481,6 +786,20 @@ export class ReportsService {
     return report.parameters;
   }
 
+  /**
+   * Retrieves all schedules associated with a report.
+   * 
+   * Fetches the report and returns its schedules, which define when
+   * the report should be automatically executed and delivered.
+   * 
+   * @param {string} id - The UUID of the report
+   * @returns {Promise<ReportSchedule[]>} Array of report schedules
+   * @throws {Error} If the report is not found
+   * 
+   * @example
+   * const schedules = await reportsService.getReportSchedules('123e4567-e89b-12d3-a456-426614174000');
+   * // Returns: [{ cronExpression: '0 0 * * *', recipients: [...], format: 'pdf' }, ...]
+   */
   async getReportSchedules(id: string): Promise<ReportSchedule[]> {
     const report = await this.reportRepository.findOneBy({id:id});
     if(!report) {
@@ -489,7 +808,28 @@ export class ReportsService {
     return report.schedules;
   }
 
-  // Map persisted report entity to an API-friendly structure for the web client
+  /**
+   * Maps a persisted report entity to an API-friendly structure for the web client.
+   * 
+   * Transforms the database report entity into a format expected by the frontend,
+   * including flattening nested query configuration into top-level properties like
+   * selectedFields, filters, groupBy, and sorting. Preserves schema information
+   * throughout the mapping process.
+   * 
+   * @private
+   * @param {Report} report - The report entity from the database
+   * @returns {Record<string, any>} Client-friendly report object
+   * 
+   * @remarks
+   * - Extracts fields from queryConfig.fields into selectedFields array
+   * - Extracts filters from queryConfig.filters into filters array
+   * - Extracts groupBy from queryConfig.groupBy into groupBy array
+   * - Extracts orderBy from queryConfig.orderBy into sorting array
+   * - Preserves schema information in all field mappings
+   * - Handles both nested ({field: {...}}) and flat field structures
+   * - Includes extensive logging for debugging mapping issues
+   * - Maps displayName, alias, and other metadata appropriately
+   */
   private mapToClientReport(report: Report): Record<string, any> {
     const query = report.queryConfig as any || {};
     const layout = report.layoutConfig as any || {};
@@ -596,8 +936,34 @@ export class ReportsService {
   }
 
   /**
-   * Export report data to Excel format
-   * Optimized for large datasets
+   * Exports report data to Excel format (.xlsx).
+   * 
+   * Generates an Excel workbook from a report definition, including headers
+   * from selected fields and all data rows. Optimized for large datasets
+   * with automatic column width calculation.
+   * 
+   * @param {any} reportDefinition - Report definition object with selectedFields and data
+   * @returns {Promise<{ buffer: Buffer; filename: string }>} Excel file buffer and generated filename
+   * 
+   * @remarks
+   * - Uses XLSX library for Excel file generation
+   * - Automatically calculates column widths based on header and data
+   * - Samples first 100 rows for width calculation (performance optimization)
+   * - Limits column width to 50 characters maximum
+   * - Generates timestamped filename with report name
+   * - Sheet name limited to 31 characters (Excel limitation)
+   * - Includes execution time logging
+   * 
+   * @example
+   * const { buffer, filename } = await reportsService.exportToExcel({
+   *   name: 'Sales Report',
+   *   selectedFields: [
+   *     { fieldName: 'customerName', displayName: 'Customer' },
+   *     { fieldName: 'total', displayName: 'Total' }
+   *   ],
+   *   // ... other report definition properties
+   * });
+   * // Returns: { buffer: Buffer, filename: 'Sales Report_2024-01-15T10-30-00.xlsx' }
    */
   async exportToExcel(reportDefinition: any): Promise<{ buffer: Buffer; filename: string }> {
     console.log('📊 Starting Excel export for:', reportDefinition?.name);

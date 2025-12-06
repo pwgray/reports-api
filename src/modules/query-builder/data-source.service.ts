@@ -4,17 +4,60 @@ import { DataSource as TypeORMDataSource, Repository } from 'typeorm';
 import { DataSource } from '../../entities/data-source.entity';
 import { DatabaseSchema, DatabaseType } from 'src/types/database-schema.type';
 
+/**
+ * Service for managing data sources and database connections.
+ * 
+ * This service provides functionality to:
+ * - Manage data source CRUD operations
+ * - Establish and cache database connections for reuse
+ * - Introspect database schemas (tables, views, procedures, relationships)
+ * - Apply filtering options during schema introspection
+ * 
+ * The service implements connection pooling by caching database connections
+ * based on connection parameters, allowing efficient reuse across multiple
+ * introspection requests.
+ * 
+ * @class DataSourceService
+ * @implements {OnModuleDestroy}
+ */
 @Injectable()
 export class DataSourceService implements OnModuleDestroy {
+  /**
+   * Cache of active database connections keyed by connection string.
+   * Connections are reused across multiple introspection requests to improve performance.
+   * 
+   * @private
+   * @type {Map<string, TypeORMDataSource>}
+   */
   private connectionCache = new Map<string, TypeORMDataSource>();
 
+  /**
+   * Creates an instance of DataSourceService.
+   * 
+   * @param {Repository<DataSource>} dataSourceRepository - TypeORM repository for DataSource entities
+   */
   constructor(
     @InjectRepository(DataSource)
     private readonly dataSourceRepository: Repository<DataSource>
   ) { }
 
   /**
-   * Generate a unique cache key for a database connection
+   * Generates a unique cache key for a database connection.
+   * 
+   * The key is based on connection parameters to ensure connections with
+   * the same parameters are reused from the cache.
+   * 
+   * @private
+   * @param {string} server - Database server hostname or IP address
+   * @param {number | undefined} port - Database server port (uses 'default' if not provided)
+   * @param {string} database - Database name
+   * @param {string} username - Database username
+   * @param {string} type - Database type (e.g., 'sqlserver', 'mysql', 'postgresql')
+   * @returns {string} A unique connection key in format: `{type}://{username}@{server}:{port}/{database}`
+   * 
+   * @example
+   * generateConnectionKey('localhost', 1433, 'Northwind', 'sa', 'sqlserver')
+   * // Returns: 'sqlserver://sa@localhost:1433/Northwind'
    */
   private generateConnectionKey(
     server: string,
@@ -27,7 +70,27 @@ export class DataSourceService implements OnModuleDestroy {
   }
 
   /**
-   * Get or create a reusable database connection
+   * Gets an existing cached database connection or creates a new one.
+   * 
+   * This method implements connection pooling by checking if a connection
+   * with the same parameters already exists in the cache. If found and
+   * still initialized, it reuses the connection. Otherwise, it creates
+   * a new connection and caches it for future use.
+   * 
+   * @private
+   * @param {string} server - Database server hostname or IP address
+   * @param {number | undefined} port - Database server port
+   * @param {string} database - Database name
+   * @param {string} username - Database username
+   * @param {string} password - Database password
+   * @param {string} type - Database type (e.g., 'sqlserver', 'mysql', 'postgresql')
+   * @returns {Promise<TypeORMDataSource>} A TypeORM DataSource instance
+   * @throws {Error} If connection initialization fails
+   * 
+   * @remarks
+   * - For SQL Server, automatically configures trustServerCertificate, encrypt, and enableArithAbort
+   * - Supports Windows domain authentication via DB_DOMAIN environment variable
+   * - Stale connections are automatically removed from cache
    */
   private async getOrCreateConnection(
     server: string,
@@ -88,7 +151,17 @@ export class DataSourceService implements OnModuleDestroy {
   }
 
   /**
-   * Cleanup method to close all cached connections when module is destroyed
+   * Cleanup method to close all cached database connections when the module is destroyed.
+   * 
+   * This method is called automatically by NestJS when the application shuts down.
+   * It ensures all database connections are properly closed to prevent resource leaks.
+   * 
+   * @returns {Promise<void>}
+   * 
+   * @remarks
+   * - Closes all connections in parallel for efficiency
+   * - Handles errors gracefully, logging but not throwing
+   * - Clears the connection cache after closing all connections
    */
   async onModuleDestroy() {
     console.log('🧹 Cleaning up database connections...');
@@ -106,6 +179,16 @@ export class DataSourceService implements OnModuleDestroy {
     console.log('✅ All connections closed');
   }
 
+  /**
+   * Finds a data source by its unique identifier.
+   * 
+   * @param {string} id - The UUID of the data source to find
+   * @returns {Promise<DataSource>} The found data source entity
+   * @throws {NotFoundException} If no data source is found with the given ID
+   * 
+   * @example
+   * const dataSource = await dataSourceService.findById('123e4567-e89b-12d3-a456-426614174000');
+   */
   async findById(id: string): Promise<DataSource> {
     const dataSource = await this.dataSourceRepository.findOne({
       where: { id }
@@ -118,16 +201,54 @@ export class DataSourceService implements OnModuleDestroy {
     return dataSource;
   }
 
+  /**
+   * Creates a new data source configuration.
+   * 
+   * @param {Partial<DataSource>} dataSource - Partial data source object with properties to set
+   * @returns {Promise<DataSource>} The created data source entity with generated ID and timestamps
+   * 
+   * @example
+   * const newDataSource = await dataSourceService.create({
+   *   name: 'Production Database',
+   *   type: DatabaseType.SQLSERVER,
+   *   server: 'localhost',
+   *   database: 'Northwind'
+   * });
+   */
   async create(dataSource: Partial<DataSource>): Promise<DataSource> {
     const newDataSource = this.dataSourceRepository.create(dataSource);
     return await this.dataSourceRepository.save(newDataSource);
   }
 
+  /**
+   * Updates an existing data source configuration.
+   * 
+   * @param {string} id - The UUID of the data source to update
+   * @param {Partial<DataSource>} dataSource - Partial data source object with properties to update
+   * @returns {Promise<DataSource>} The updated data source entity
+   * @throws {NotFoundException} If no data source is found with the given ID
+   * 
+   * @example
+   * const updated = await dataSourceService.update('123e4567-e89b-12d3-a456-426614174000', {
+   *   name: 'Updated Database Name',
+   *   port: 1434
+   * });
+   */
   async update(id: string, dataSource: Partial<DataSource>): Promise<DataSource> {
     await this.dataSourceRepository.update(id, dataSource);
     return this.findById(id);
   }
 
+  /**
+   * Deletes a data source by its unique identifier.
+   * 
+   * @param {string} id - The UUID of the data source to delete
+   * @returns {Promise<void>}
+   * @throws {NotFoundException} If no data source is found with the given ID
+   * 
+   * @example
+   * await dataSourceService.delete('123e4567-e89b-12d3-a456-426614174000');
+   */
   async delete(id: string): Promise<void> {
     const result = await this.dataSourceRepository.delete(id);
     if (result.affected === 0) {
@@ -135,10 +256,59 @@ export class DataSourceService implements OnModuleDestroy {
     }
   }
 
+  /**
+   * Retrieves all data sources from the database.
+   * 
+   * @returns {Promise<DataSource[]>} An array of all data source entities
+   * 
+   * @example
+   * const allDataSources = await dataSourceService.findAll();
+   * console.log(`Found ${allDataSources.length} data sources`);
+   */
   async findAll(): Promise<DataSource[]> {
     return this.dataSourceRepository.find();
   }
 
+  /**
+   * Introspects a database schema and returns detailed metadata.
+   * 
+   * This method connects to a database and retrieves comprehensive schema information
+   * including tables, views, stored procedures, columns, indexes, constraints, and
+   * relationships. The introspection supports filtering by schema, object type, and
+   * object name patterns.
+   * 
+   * @param {string} server - Database server hostname or IP address
+   * @param {number | undefined} port - Database server port
+   * @param {string} database - Database name to introspect
+   * @param {string} username - Database username for authentication
+   * @param {string} password - Database password for authentication
+   * @param {string} type - Database type (e.g., 'sqlserver', 'mysql', 'postgresql')
+   * @param {string[]} [includedSchemas] - Optional array of schema names to include (e.g., ['dbo', 'custom'])
+   * @param {string[]} [includedObjectTypes] - Optional array of object types to include (e.g., ['table', 'view', 'procedure'])
+   * @param {string} [objectNamePattern] - Optional SQL LIKE pattern for filtering objects by name (e.g., 'Customer%')
+   * @returns {Promise<DatabaseSchema>} A DatabaseSchema object containing tables, views, procedures, relationships, and statistics
+   * @throws {Error} If connection fails or database query execution fails
+   * 
+   * @remarks
+   * - Currently optimized for SQL Server databases
+   * - Uses cached connections when possible for better performance
+   * - Returns normalized data types for better cross-database compatibility
+   * - Includes row counts, indexes, foreign keys, and relationship mappings
+   * - Failed connections are automatically removed from cache
+   * 
+   * @example
+   * const schema = await dataSourceService.introspect(
+   *   'localhost',
+   *   1433,
+   *   'Northwind',
+   *   'sa',
+   *   'password',
+   *   'sqlserver',
+   *   ['dbo', 'sales'],  // Only include these schemas
+   *   ['table', 'view'], // Only include tables and views
+   *   'Customer%'        // Only objects starting with 'Customer'
+   * );
+   */
   async introspect(
     server: string, 
     port: number | undefined, 
@@ -529,6 +699,25 @@ export class DataSourceService implements OnModuleDestroy {
     }
   }
 
+  /**
+   * Maps a database type string to the corresponding TypeORM driver name.
+   * 
+   * This method converts user-friendly database type names to the driver names
+   * expected by TypeORM for connection configuration.
+   * 
+   * @private
+   * @param {string} type - Database type (e.g., 'sqlserver', 'mysql', 'postgresql', 'oracle')
+   * @returns {string} The corresponding TypeORM driver name
+   * 
+   * @example
+   * mapDatabaseTypeToDriver('sqlserver') // Returns 'mssql'
+   * mapDatabaseTypeToDriver('postgresql') // Returns 'postgres'
+   * mapDatabaseTypeToDriver('mysql') // Returns 'mysql'
+   * 
+   * @remarks
+   * - Returns the input type unchanged if no mapping is found
+   * - Case-insensitive matching
+   */
   private mapDatabaseTypeToDriver(type: string): string {
     const typeMap: { [key: string]: string } = {
       'sqlserver': 'mssql',
