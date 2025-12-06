@@ -47,16 +47,19 @@ describe('SchedulerController', () => {
       const format = 'pdf';
       const scheduleTime = new Date('2024-12-31');
 
-      mockSchedulerService.scheduleReport.mockResolvedValue(undefined);
-
-      await controller.scheduleReport(
+      const scheduleDto = {
         reportId,
         userId,
         parameters,
         recipients,
         format,
-        scheduleTime
-      );
+        cronExpression: '0 0 * * *',
+        scheduleTime: scheduleTime.toISOString()
+      };
+
+      mockSchedulerService.scheduleReport.mockResolvedValue(undefined);
+
+      await controller.scheduleReport(scheduleDto);
 
       expect(service.scheduleReport).toHaveBeenCalledWith(
         reportId,
@@ -73,14 +76,17 @@ describe('SchedulerController', () => {
       const scheduleTime = new Date();
       mockSchedulerService.scheduleReport.mockResolvedValue(undefined);
 
-      await controller.scheduleReport(
-        'report-1',
-        'user-1',
-        {},
-        ['user@example.com'],
-        'html',
-        scheduleTime
-      );
+      const scheduleDto = {
+        reportId: 'report-1',
+        userId: 'user-1',
+        parameters: {},
+        recipients: ['user@example.com'],
+        format: 'html' as const,
+        cronExpression: '0 0 * * *',
+        scheduleTime: scheduleTime.toISOString()
+      };
+
+      await controller.scheduleReport(scheduleDto);
 
       expect(service.scheduleReport).toHaveBeenCalledWith(
         'report-1',
@@ -96,14 +102,17 @@ describe('SchedulerController', () => {
       const scheduleTime = new Date();
       mockSchedulerService.scheduleReport.mockResolvedValue(undefined);
 
-      await controller.scheduleReport(
-        'report-1',
-        'user-1',
-        {},
-        ['analyst@example.com'],
-        'excel',
-        scheduleTime
-      );
+      const scheduleDto = {
+        reportId: 'report-1',
+        userId: 'user-1',
+        parameters: {},
+        recipients: ['analyst@example.com'],
+        format: 'excel' as const,
+        cronExpression: '0 0 * * *',
+        scheduleTime: scheduleTime.toISOString()
+      };
+
+      await controller.scheduleReport(scheduleDto);
 
       expect(service.scheduleReport).toHaveBeenCalledWith(
         'report-1',
@@ -117,17 +126,20 @@ describe('SchedulerController', () => {
 
     it('should handle multiple recipients', async () => {
       const recipients = ['user1@example.com', 'user2@example.com', 'user3@example.com'];
-      const scheduleTime = new Date();
+      const scheduleTime = new Date('2025-12-06T12:25:50.545Z');
       mockSchedulerService.scheduleReport.mockResolvedValue(undefined);
 
-      await controller.scheduleReport(
-        'report-1',
-        'user-1',
-        {},
+      const scheduleDto = {
+        reportId: 'report-1',
+        userId: 'user-1',
+        parameters: {},
         recipients,
-        'pdf',
-        scheduleTime
-      );
+        format: 'pdf' as const,
+        cronExpression: '0 0 * * *',
+        scheduleTime: scheduleTime.toISOString()
+      };
+
+      await controller.scheduleReport(scheduleDto);
 
       expect(service.scheduleReport).toHaveBeenCalledWith(
         'report-1',
@@ -143,16 +155,17 @@ describe('SchedulerController', () => {
       const error = new Error('Scheduling failed');
       mockSchedulerService.scheduleReport.mockRejectedValue(error);
 
-      await expect(
-        controller.scheduleReport(
-          'report-1',
-          'user-1',
-          {},
-          ['user@example.com'],
-          'pdf',
-          new Date()
-        )
-      ).rejects.toThrow('Scheduling failed');
+      const scheduleDto = {
+        reportId: 'report-1',
+        userId: 'user-1',
+        parameters: {},
+        recipients: ['user@example.com'],
+        format: 'pdf' as const,
+        cronExpression: '0 0 * * *',
+        scheduleTime: new Date().toISOString()
+      };
+
+      await expect(controller.scheduleReport(scheduleDto)).rejects.toThrow('Scheduling failed');
     });
   });
 
