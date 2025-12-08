@@ -188,6 +188,17 @@ export class ReportsService {
       }
     }
     
+    // Handle dataSource relationship - support both dataSourceId (from DTO) and dataSource object
+    const reportAny = report as any;
+    if (reportAny.dataSourceId) {
+      // DTO format: dataSourceId is a string UUID
+      report.dataSource = { id: reportAny.dataSourceId } as any;
+    } else if (report.dataSource && typeof report.dataSource === 'object' && 'id' in report.dataSource) {
+      // Legacy format: dataSource is an object with id
+      const dataSourceId = (report.dataSource as any).id;
+      report.dataSource = { id: dataSourceId } as any;
+    }
+    
     return this.reportRepository.save(report);
   }
 
@@ -208,6 +219,9 @@ export class ReportsService {
    * - Note: This method saves the entire report entity, not just changed fields
    */
   async updateReport(id: string, report: Report): Promise<Report> {
+    // Set the report ID for the update
+    report.id = id;
+    
     // Ensure layoutConfig is properly set
     if (report.layoutConfig) {
       // If layoutConfig is already an object, it will be automatically serialized by TypeORM
@@ -219,6 +233,17 @@ export class ReportsService {
           console.error('Failed to parse layoutConfig:', error);
         }
       }
+    }
+    
+    // Handle dataSource relationship - support both dataSourceId (from DTO) and dataSource object
+    const reportAny = report as any;
+    if (reportAny.dataSourceId) {
+      // DTO format: dataSourceId is a string UUID
+      report.dataSource = { id: reportAny.dataSourceId } as any;
+    } else if (report.dataSource && typeof report.dataSource === 'object' && 'id' in report.dataSource) {
+      // Legacy format: dataSource is an object with id
+      const dataSourceId = (report.dataSource as any).id;
+      report.dataSource = { id: dataSourceId } as any;
     }
     
     return this.reportRepository.save(report);
@@ -321,6 +346,16 @@ export class ReportsService {
       fields: (reportDefinition.selectedFields || []).map((field: any, index: number) => {
         console.log(`🔧 Processing field:`, JSON.stringify(field, null, 2));
         
+        // Handle DTO format (name, alias, type) - parse the name field
+        if (field.name && !field.tableName) {
+          const parsed = this.parseQualifiedFieldName(field.name);
+          field.tableName = parsed.tableName;
+          field.fieldName = parsed.fieldName;
+          field.schema = parsed.schema;
+          field.displayName = field.alias || field.displayName;
+          field.dataType = field.type || field.dataType;
+        }
+        
         // Validate field has required properties
         if (!field.tableName || field.tableName === 'undefined') {
           throw new Error(`Field at index ${index} has invalid tableName: "${field.tableName}". Please check the field configuration.`);
@@ -377,10 +412,21 @@ export class ReportsService {
       }),
       tables: this.extractTablesWithSchemaFromFields(reportDefinition.selectedFields || [], fieldMapper),
       filters: (reportDefinition.filters || []).map((filter: any) => {
-        const correctNames = fieldMapper(filter.field.tableName, filter.field.fieldName);
+        // Handle DTO format where field is a string (fully qualified name)
+        let filterField = filter.field;
+        if (typeof filter.field === 'string') {
+          const parsed = this.parseQualifiedFieldName(filter.field);
+          filterField = {
+            tableName: parsed.tableName,
+            fieldName: parsed.fieldName,
+            schema: parsed.schema
+          };
+        }
+        
+        const correctNames = fieldMapper(filterField.tableName, filterField.fieldName);
         return {
           field: {
-            ...filter.field,
+            ...filterField,
             schemaName: correctNames.schemaName,
             tableName: correctNames.tableName,
             fieldName: correctNames.fieldName
@@ -450,6 +496,39 @@ export class ReportsService {
     } catch (error) {
       console.error('Preview error:', error);
       throw error;
+    }
+  }
+
+  /**
+   * Parses a fully qualified field name into its components.
+   * Handles formats: "schema.tableName.fieldName" or "tableName.fieldName"
+   * 
+   * @private
+   * @param {string} qualifiedName - Fully qualified field name
+   * @returns {{ schema?: string; tableName: string; fieldName: string }} Parsed components
+   */
+  private parseQualifiedFieldName(qualifiedName: string): { schema?: string; tableName: string; fieldName: string } {
+    const parts = qualifiedName.split('.');
+    if (parts.length === 3) {
+      // Format: schema.tableName.fieldName
+      return {
+        schema: parts[0],
+        tableName: parts[1],
+        fieldName: parts[2]
+      };
+    } else if (parts.length === 2) {
+      // Format: tableName.fieldName
+      return {
+        tableName: parts[0],
+        fieldName: parts[1]
+      };
+    } else {
+      // Invalid format, return as-is
+      console.warn(`⚠️  Invalid qualified field name format: ${qualifiedName}`);
+      return {
+        tableName: qualifiedName,
+        fieldName: qualifiedName
+      };
     }
   }
 
@@ -837,18 +916,31 @@ export class ReportsService {
     // Use the actual selectedFields column instead of extracting from query.fields
     const selectedFields = Array.isArray(report.queryConfig.fields)
       ? report.queryConfig.fields.map((f: any) => {
-          const schema = f.schemaName || f.schema;
-          if (schema) {
-            console.log(`📤 Mapping field from DB with schema: ${schema}.${f.tableName}.${f.fieldName}`);
-          } else {
-            console.log(`⚠️  Mapping field from DB WITHOUT schema: ${f.tableName}.${f.fieldName}`);
+          // Handle DTO format (name, alias, type) - parse the name field
+          let tableName = f.tableName;
+          let fieldName = f.fieldName;
+          let schema = f.schemaName || f.schema;
+          
+          if (f.name && !tableName) {
+            // DTO format: parse the fully qualified name
+            const parsed = this.parseQualifiedFieldName(f.name);
+            tableName = parsed.tableName;
+            fieldName = parsed.fieldName;
+            schema = parsed.schema || schema;
           }
+          
+          if (schema) {
+            console.log(`📤 Mapping field from DB with schema: ${schema}.${tableName}.${fieldName}`);
+          } else {
+            console.log(`⚠️  Mapping field from DB WITHOUT schema: ${tableName}.${fieldName}`);
+          }
+          
           return {
-            id: f.id || `${f.tableName}.${f.fieldName}`,
-            tableName: f.tableName,
-            fieldName: f.fieldName,
-            displayName: f.alias || f.displayName || f.fieldName,
-            dataType: f.dataType,
+            id: f.id || `${tableName}.${fieldName}`,
+            tableName: tableName,
+            fieldName: fieldName,
+            displayName: f.alias || f.displayName || fieldName,
+            dataType: f.type || f.dataType,
             aggregation: f.aggregation,
             formatting: f.formatting,
             schema: schema // ✅ Preserve schema property!
@@ -857,24 +949,37 @@ export class ReportsService {
       : [];
 
     const filters = Array.isArray(query.filters)
-      ? query.filters.map((fl: any) => ({
-          id: fl.id,
-          field: fl.field
-            ? {
-                id: fl.field.id || `${fl.field.tableName}.${fl.field.fieldName}`,
-                tableName: fl.field.tableName,
-                fieldName: fl.field.fieldName,
-                displayName: fl.field.alias || fl.field.fieldName,
-                dataType: fl.field.dataType,
-                aggregation: fl.field.aggregation,
-                formatting: fl.field.formatting,
-                schema: fl.field.schemaName || fl.field.schema // ✅ Preserve schema
-              }
-            : undefined,
-          operator: fl.operator,
-          value: fl.value,
-          displayText: fl.displayText || ''
-        }))
+      ? query.filters.map((fl: any) => {
+          // Handle DTO format where field is a string (fully qualified name)
+          let fieldObj = fl.field;
+          if (typeof fl.field === 'string') {
+            const parsed = this.parseQualifiedFieldName(fl.field);
+            fieldObj = {
+              tableName: parsed.tableName,
+              fieldName: parsed.fieldName,
+              schema: parsed.schema
+            };
+          }
+          
+          return {
+            id: fl.id,
+            field: fieldObj
+              ? {
+                  id: fieldObj.id || `${fieldObj.tableName}.${fieldObj.fieldName}`,
+                  tableName: fieldObj.tableName,
+                  fieldName: fieldObj.fieldName,
+                  displayName: fieldObj.alias || fieldObj.displayName || fieldObj.fieldName,
+                  dataType: fieldObj.type || fieldObj.dataType,
+                  aggregation: fieldObj.aggregation,
+                  formatting: fieldObj.formatting,
+                  schema: fieldObj.schema || fieldObj.schemaName // ✅ Preserve schema
+                }
+              : undefined,
+            operator: fl.operator,
+            value: fl.value,
+            displayText: fl.displayText || ''
+          };
+        })
       : [];
 
     console.log('📦 Raw groupBy from DB:', JSON.stringify(query.groupBy, null, 2));
