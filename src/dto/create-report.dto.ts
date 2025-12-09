@@ -24,8 +24,9 @@ export class CreateReportDto {
   @Type(() => LayoutConfigurationDto)
   layoutConfig: LayoutConfigurationDto;
 
-  @IsUUID()
+  @IsUUID(undefined, { message: 'dataSourceId must be a valid UUID' })
   dataSourceId: string;
 
-  createdBy: string; // User ID of the report creator
+  @IsOptional()
+  createdBy?: string; // User ID of the report creator
 }
